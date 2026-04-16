@@ -1,0 +1,14 @@
+[package]
+name = "wysiwyg-core"
+version = "0.1.0"
+edition = "2021"
+description = "Platform-independent core for a WYSIWYG editor (document model, schema, transforms, state)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+unicode-segmentation = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

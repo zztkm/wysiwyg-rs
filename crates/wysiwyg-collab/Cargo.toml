@@ -1,0 +1,11 @@
+[package]
+name = "wysiwyg-collab"
+version = "0.1.0"
+edition = "2021"
+description = "Collaborative editing layer for wysiwyg-rs using yrs (CRDT)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+wysiwyg-core = { path = "../wysiwyg-core" }
+yrs = { workspace = true }
+serde = { workspace = true }
