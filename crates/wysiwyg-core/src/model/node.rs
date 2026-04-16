@@ -26,6 +26,11 @@ pub struct Node {
     pub marks: MarkSet,
     /// For text nodes only: the text content.
     pub text: Option<Arc<str>>,
+    /// True for atom (indivisible) nodes such as `hard_break`.
+    /// Atom nodes always have size 1 regardless of content.
+    /// Defaults to `false` for regular branch nodes and text nodes.
+    #[serde(default)]
+    pub is_atom: bool,
 }
 
 impl Node {
@@ -37,10 +42,11 @@ impl Node {
             content,
             marks,
             text: None,
+            is_atom: false,
         }
     }
 
-    /// Create a text node.  `content` must be empty.
+    /// Create a text node.
     pub fn text(type_id: NodeTypeId, text: impl Into<Arc<str>>, marks: MarkSet) -> Self {
         Node {
             type_id,
@@ -48,23 +54,35 @@ impl Node {
             content: Fragment::empty(),
             marks,
             text: Some(text.into()),
+            is_atom: false,
+        }
+    }
+
+    /// Create an atom (indivisible) node such as `hard_break`.
+    /// Atom nodes have size 1 and are treated as leaves.
+    pub fn atom(type_id: NodeTypeId, attrs: Attrs, marks: MarkSet) -> Self {
+        Node {
+            type_id,
+            attrs,
+            content: Fragment::empty(),
+            marks,
+            text: None,
+            is_atom: true,
         }
     }
 
     /// The size of this node in logical position units:
     /// - text node: number of `char`s (Unicode scalar values)
-    /// - non-text leaf (atom): 1
-    /// - branch node: content size + 2 (opening + closing token)
+    /// - atom leaf: 1
+    /// - branch node: `content.size + 2` (opening + closing token)
+    ///   — this is 2 even for empty branch nodes (e.g., empty paragraph)
     pub fn node_size(&self) -> usize {
-        match &self.text {
-            Some(t) => t.chars().count(),
-            None => {
-                if self.content.is_empty() {
-                    1 // atom leaf
-                } else {
-                    self.content.size + 2
-                }
-            }
+        if let Some(t) = &self.text {
+            t.chars().count()
+        } else if self.is_atom {
+            1
+        } else {
+            self.content.size + 2
         }
     }
 
@@ -72,8 +90,10 @@ impl Node {
         self.text.is_some()
     }
 
+    /// A node is a leaf if it is a text node or an atom.
+    /// Empty branch nodes (e.g., empty paragraphs) are NOT leaves.
     pub fn is_leaf(&self) -> bool {
-        self.content.is_empty()
+        self.text.is_some() || self.is_atom
     }
 
     /// Number of direct children.
@@ -93,6 +113,7 @@ impl PartialEq for Node {
             && self.content == other.content
             && self.marks == other.marks
             && self.text == other.text
+            && self.is_atom == other.is_atom
     }
 }
 
@@ -272,6 +293,27 @@ mod tests {
         assert_eq!(cut.size, 4);
         assert_eq!(cut.child(0).unwrap().text.as_deref(), Some("oo"));
         assert_eq!(cut.child(1).unwrap().text.as_deref(), Some("ba"));
+    }
+
+    #[test]
+    fn empty_branch_node_size_is_two() {
+        // An empty paragraph (no text, no children, not atom) must have size 2.
+        let p = Arc::new(Node::new(
+            PARA_TYPE,
+            Attrs::empty(),
+            Fragment::empty(),
+            MarkSet::empty(),
+        ));
+        assert_eq!(p.node_size(), 2);
+        assert!(!p.is_leaf(), "empty branch is NOT a leaf");
+    }
+
+    #[test]
+    fn atom_node_size_is_one() {
+        const HARD_BREAK: NodeTypeId = NodeTypeId(8);
+        let hb = Arc::new(Node::atom(HARD_BREAK, Attrs::empty(), MarkSet::empty()));
+        assert_eq!(hb.node_size(), 1);
+        assert!(hb.is_leaf(), "atom IS a leaf");
     }
 
     #[test]

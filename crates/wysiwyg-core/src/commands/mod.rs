@@ -5,8 +5,10 @@
 //! selection is empty), it returns `None`.  The caller decides whether to
 //! apply the returned transaction to produce a new state.
 
-pub mod marks;
 pub mod blocks;
+pub mod input;
+pub mod marks;
 
-pub use marks::{toggle_bold, toggle_italic, toggle_code, toggle_mark};
 pub use blocks::{set_block_type, toggle_heading};
+pub use input::insert_text;
+pub use marks::{toggle_bold, toggle_code, toggle_italic, toggle_mark};
