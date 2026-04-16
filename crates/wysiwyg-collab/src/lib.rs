@@ -5,6 +5,14 @@
 //   - Text insertions and deletions (ReplaceStep with text content)
 //   - Mark changes and block-type changes are NOT synced to yrs in this prototype
 //   - Two-peer convergence is the exit criterion
+//
+// TODO: nested block support (blockquote, list_item containing blocks)
+// TODO: sync AddMarkStep / RemoveMarkStep to yrs as XmlElement attributes
+// TODO: sync block-type changes (heading, code_block) to yrs element tag names
+// TODO: handle ReplaceAroundStep (wrap / lift operations)
+// TODO: proper initial-state sharing — CollabState::new() creates a paragraph per peer,
+//       leading to N paragraphs after CRDT merge; real use requires one peer to initialise
+//       and distribute state via encode_state_as_update → apply_remote_update before editing
 
 use std::sync::Arc;
 
@@ -32,6 +40,12 @@ use yrs::{
 ///
 /// Returns `None` if the position is on a block boundary (not inside text content)
 /// or out of range.
+///
+/// # Limitations
+///
+/// TODO: only handles a flat `doc > [block*]` structure; nested blocks
+///       (e.g. `blockquote > paragraph`) are not resolved correctly because
+///       the function iterates only the top-level children of `doc`.
 pub fn resolve_text_pos(doc: &Arc<Node>, pm_pos: usize) -> Option<(u32, u32)> {
     let mut offset = 0usize;
     for (idx, child) in doc.content.children.iter().enumerate() {
@@ -56,6 +70,14 @@ pub fn resolve_text_pos(doc: &Arc<Node>, pm_pos: usize) -> Option<(u32, u32)> {
 ///
 /// Only `<paragraph>` elements containing `XmlText` children are supported.
 /// Unknown elements are skipped.
+///
+/// # Limitations
+///
+/// TODO: heading / code_block support — map yrs element tag names (e.g. `"heading"`)
+///       back to the correct PM node type and restore attrs (e.g. `level`).
+/// TODO: mark reconstruction — yrs XmlText attributes should map back to PM marks
+///       (bold, italic, code, link) when mark sync is implemented.
+/// TODO: nested block reconstruction (blockquote, list_item).
 pub fn build_pm_doc_from_yrs<T: ReadTxn>(
     content: &yrs::XmlFragmentRef,
     txn: &T,
@@ -138,6 +160,16 @@ pub struct CollabState {
 impl CollabState {
     /// Create a new `CollabState` from a `yrs::Doc` id (useful for multi-peer
     /// tests) and an empty document.
+    ///
+    /// # Known limitation
+    ///
+    /// Each peer that calls `new()` inserts its own initial empty paragraph into
+    /// its private yrs document.  After a CRDT merge the two paragraphs coexist,
+    /// resulting in N paragraphs for N peers rather than a single shared document.
+    ///
+    /// TODO: replace this constructor with a factory pattern where one designated
+    ///       peer creates the document and distributes the initial state via
+    ///       `encode_state_as_update` before any other peer starts editing.
     pub fn new(client_id: u64) -> Self {
         let schema = basic_schema();
         let editor = EditorState::with_empty_doc(schema);
@@ -168,7 +200,10 @@ impl CollabState {
                     if let Step::Replace(rs) = step {
                         self.sync_replace_step_to_yrs(rs, &doc_before);
                     }
-                    // Mark and block steps are not synced in the prototype.
+                    // TODO: sync AddMarkStep / RemoveMarkStep — store mark state as
+                    //       XmlText attributes in yrs so remote peers can reconstruct marks.
+                    // TODO: sync ReplaceAroundStep — needed for wrap/lift (e.g. turning a
+                    //       paragraph into a blockquote or list item).
                 }
                 true
             }
@@ -188,6 +223,12 @@ impl CollabState {
 
     /// Read the yrs document and reconstruct the PM doc, updating the editor
     /// state in place.
+    ///
+    /// # Known limitation
+    ///
+    /// TODO: the selection is always reset to `cursor(1)` after a remote update.
+    ///       The correct behaviour is to remap the existing selection through the
+    ///       update's `Mapping` so the cursor follows the user's intended position.
     pub fn rebuild_pm_from_yrs(&mut self) {
         let txn = self.ydoc.transact();
         let content = txn
@@ -197,7 +238,7 @@ impl CollabState {
         self.editor = EditorState::new(
             self.editor.schema.clone(),
             new_doc,
-            Selection::cursor(1),
+            Selection::cursor(1), // TODO: remap selection through the update mapping
         );
     }
 
@@ -216,6 +257,9 @@ impl CollabState {
         // A text insertion/deletion has from==to (cursor insert) or
         // from<to (range delete/replace) and a slice with 0 open ends.
         if rs.slice.open_start != 0 || rs.slice.open_end != 0 {
+            // TODO: handle open slices — these represent block splits (Enter key) and
+            //       block merges (Backspace at start of paragraph), which require
+            //       inserting or removing XmlElement nodes from the yrs XmlFragment.
             return; // Block-level change — not synced in prototype
         }
 
@@ -242,7 +286,10 @@ impl CollabState {
                         }
                     }
                 }
-                // Cross-paragraph deletions: not supported in the prototype.
+                // TODO: cross-paragraph deletions (bi != bi_to) — requires removing
+                //       text from the tail of the first paragraph, removing intermediate
+                //       paragraphs entirely, and removing text from the head of the last
+                //       paragraph, all within a single yrs transaction.
             }
         }
 
@@ -267,6 +314,10 @@ impl CollabState {
 /// Extract the concatenated text from a `Slice` that contains exactly one
 /// paragraph of flat text nodes.  Returns `None` if the slice has nested
 /// structure or contains no text.
+///
+/// TODO: handle multi-paragraph slices (paste spanning multiple blocks).
+/// TODO: preserve mark information — currently marks on text nodes are discarded,
+///       which means pasted bold/italic text loses its formatting in the yrs layer.
 fn extract_flat_text_from_slice(slice: &wysiwyg_core::model::slice::Slice) -> Option<String> {
     if slice.content.is_empty() {
         return None;
