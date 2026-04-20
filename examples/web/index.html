@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>wysiwyg-rs デモ</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, sans-serif;
+      background: #f5f5f5;
+      color: #222;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background: #1a1a2e;
+      color: #fff;
+      padding: 12px 20px;
+      font-size: 1.1rem;
+      font-weight: bold;
+      letter-spacing: 0.03em;
+    }
+
+    header span {
+      opacity: 0.6;
+      font-weight: normal;
+      font-size: 0.85rem;
+      margin-left: 10px;
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      gap: 0;
+      flex: 1;
+      min-height: 0;
+    }
+
+    /* ---- 左ペイン: コントロール ---- */
+    .controls {
+      background: #fff;
+      border-right: 1px solid #ddd;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      padding: 16px;
+      overflow-y: auto;
+    }
+
+    .section-title {
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #888;
+      margin-bottom: 6px;
+    }
+
+    /* ツールバー */
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+    }
+
+    .toolbar button {
+      padding: 5px 10px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      background: #fafafa;
+      cursor: pointer;
+      font-size: 0.85rem;
+      transition: background 0.1s;
+    }
+
+    .toolbar button:hover { background: #e8e8e8; }
+    .toolbar button:active { background: #d0d0d0; }
+    .toolbar button:disabled { opacity: 0.4; cursor: default; }
+
+    .toolbar .sep {
+      width: 1px;
+      background: #ddd;
+      align-self: stretch;
+      margin: 0 2px;
+    }
+
+    /* 入力グループ */
+    .input-group {
+      display: flex;
+      gap: 6px;
+    }
+
+    .input-group input[type="text"],
+    .input-group input[type="number"] {
+      flex: 1;
+      padding: 6px 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 0.9rem;
+    }
+
+    .input-group input[type="number"] { width: 70px; flex: none; }
+
+    .input-group button {
+      padding: 6px 12px;
+      border: 1px solid #3a86ff;
+      border-radius: 4px;
+      background: #3a86ff;
+      color: #fff;
+      cursor: pointer;
+      font-size: 0.85rem;
+      white-space: nowrap;
+    }
+
+    .input-group button:hover { background: #2a76ef; }
+
+    /* 選択状態バッジ */
+    .sel-info {
+      font-size: 0.82rem;
+      color: #555;
+      background: #f0f4ff;
+      border: 1px solid #c5d3ff;
+      border-radius: 4px;
+      padding: 6px 10px;
+    }
+
+    /* ---- 右ペイン: 出力 ---- */
+    .output {
+      display: grid;
+      grid-template-rows: 1fr 1fr;
+      min-height: 0;
+    }
+
+    .panel {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      border-bottom: 1px solid #ddd;
+    }
+
+    .panel-header {
+      background: #f0f0f0;
+      border-bottom: 1px solid #ddd;
+      padding: 6px 14px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #666;
+      flex-shrink: 0;
+    }
+
+    /* ドキュメントプレビュー */
+    #preview {
+      flex: 1;
+      padding: 16px 20px;
+      overflow-y: auto;
+      line-height: 1.7;
+      font-size: 0.95rem;
+    }
+
+    #preview p   { margin-bottom: 0.5em; }
+    #preview h1  { font-size: 1.6em; margin-bottom: 0.3em; }
+    #preview h2  { font-size: 1.35em; margin-bottom: 0.3em; }
+    #preview h3  { font-size: 1.15em; margin-bottom: 0.3em; }
+    #preview strong { font-weight: 700; }
+    #preview em  { font-style: italic; }
+    #preview code { font-family: monospace; background: #eee; padding: 1px 4px; border-radius: 3px; }
+    #preview .empty-hint { color: #aaa; font-style: italic; }
+
+    /* JSON ビュー */
+    #json-view {
+      flex: 1;
+      padding: 12px 16px;
+      overflow-y: auto;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.8rem;
+      white-space: pre;
+      background: #1a1a2e;
+      color: #a8d8ea;
+    }
+  </style>
+</head>
+<body>
+<header>
+  wysiwyg-rs デモ
+  <span>コアライブラリの動作確認用コンソール（レンダリングレイヤーは含まず）</span>
+</header>
+
+<main>
+  <!-- 左ペイン -->
+  <aside class="controls">
+
+    <section>
+      <div class="section-title">履歴</div>
+      <div class="toolbar">
+        <button id="btn-undo" title="元に戻す">↩ Undo</button>
+        <button id="btn-redo" title="やり直す">↪ Redo</button>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-title">インラインマーク</div>
+      <div class="toolbar">
+        <button id="btn-bold"><strong>B</strong></button>
+        <button id="btn-italic"><em>I</em></button>
+        <button id="btn-code">〈/〉</button>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-title">ブロック種別</div>
+      <div class="toolbar">
+        <button id="btn-h1">H1</button>
+        <button id="btn-h2">H2</button>
+        <button id="btn-h3">H3</button>
+        <div class="sep"></div>
+        <button id="btn-para">¶ Paragraph</button>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-title">テキスト挿入（カーソル位置へ）</div>
+      <div class="input-group">
+        <input id="text-input" type="text" placeholder="入力するテキスト…" value="Hello, world!">
+        <button id="btn-insert">挿入</button>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-title">カーソル移動</div>
+      <div class="input-group">
+        <input id="cursor-pos" type="number" min="0" value="1">
+        <button id="btn-cursor">移動</button>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-title">選択範囲</div>
+      <div class="input-group">
+        <input id="sel-anchor" type="number" min="0" value="1" title="anchor">
+        <input id="sel-head"   type="number" min="0" value="1" title="head">
+        <button id="btn-select">選択</button>
+      </div>
+    </section>
+
+    <div id="sel-info" class="sel-info">選択: なし</div>
+
+  </aside>
+
+  <!-- 右ペイン -->
+  <div class="output">
+    <div class="panel">
+      <div class="panel-header">ドキュメントプレビュー</div>
+      <div id="preview"><span class="empty-hint">（空のドキュメント）</span></div>
+    </div>
+    <div class="panel">
+      <div class="panel-header">ドキュメント JSON (get_doc)</div>
+      <div id="json-view"></div>
+    </div>
+  </div>
+</main>
+
+<script type="module">
+  import init, { WasmEditor } from './pkg/wysiwyg_wasm.js';
+
+  await init();
+  const editor = new WasmEditor();
+
+  // ---- UI 更新 ----
+
+  function refresh() {
+    const docJson = editor.get_doc();
+    const selJson = editor.get_selection();
+    const doc = JSON.parse(docJson);
+    const sel = JSON.parse(selJson);
+
+    // JSON ビュー
+    document.getElementById('json-view').textContent = JSON.stringify(doc, null, 2);
+
+    // プレビュー
+    const preview = document.getElementById('preview');
+    preview.innerHTML = renderDoc(doc);
+    if (!preview.innerHTML.trim()) {
+      preview.innerHTML = '<span class="empty-hint">（空のドキュメント）</span>';
+    }
+
+    // 選択情報
+    const selInfo = document.getElementById('sel-info');
+    if (sel.anchor === sel.head) {
+      selInfo.textContent = `カーソル位置: ${sel.anchor}`;
+    } else {
+      selInfo.textContent = `選択範囲: anchor=${sel.anchor}  head=${sel.head}`;
+    }
+
+    // cursor/select の入力値を同期
+    document.getElementById('cursor-pos').value = sel.anchor;
+    document.getElementById('sel-anchor').value = sel.anchor;
+    document.getElementById('sel-head').value   = sel.head;
+
+    // undo/redo ボタンの有効・無効
+    document.getElementById('btn-undo').disabled = !editor.can_undo();
+    document.getElementById('btn-redo').disabled = !editor.can_redo();
+  }
+
+  // ---- ドキュメントを HTML にレンダリング ----
+
+  function renderDoc(doc) {
+    return (doc.content || []).map(renderBlock).join('');
+  }
+
+  function renderBlock(node) {
+    const inner = (node.content || []).map(renderInline).join('');
+    switch (node.type) {
+      case 'paragraph': return `<p>${inner || '&nbsp;'}</p>`;
+      case 'heading': {
+        const lvl = node.attrs?.level ?? 1;
+        return `<h${lvl}>${inner}</h${lvl}>`;
+      }
+      case 'code_block': return `<pre><code>${inner}</code></pre>`;
+      default: return `<p>${inner}</p>`;
+    }
+  }
+
+  function renderInline(node) {
+    if (node.type !== 'text') return '';
+    let html = escapeHtml(node.text ?? '');
+    for (const mark of node.marks ?? []) {
+      switch (mark.type) {
+        case 'bold':   html = `<strong>${html}</strong>`; break;
+        case 'italic': html = `<em>${html}</em>`; break;
+        case 'code':   html = `<code>${html}</code>`; break;
+      }
+    }
+    return html;
+  }
+
+  function escapeHtml(str) {
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  // ---- イベント登録 ----
+
+  document.getElementById('btn-insert').addEventListener('click', () => {
+    const text = document.getElementById('text-input').value;
+    if (text) { editor.insert_text(text); refresh(); }
+  });
+
+  // Enter キーでも挿入できるように
+  document.getElementById('text-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      document.getElementById('btn-insert').click();
+    }
+  });
+
+  document.getElementById('btn-undo').addEventListener('click', () => { editor.undo(); refresh(); });
+  document.getElementById('btn-redo').addEventListener('click', () => { editor.redo(); refresh(); });
+
+  document.getElementById('btn-bold').addEventListener('click',  () => { editor.toggle_bold(); refresh(); });
+  document.getElementById('btn-italic').addEventListener('click',() => { editor.toggle_italic(); refresh(); });
+  document.getElementById('btn-code').addEventListener('click',  () => { editor.toggle_code(); refresh(); });
+
+  document.getElementById('btn-h1').addEventListener('click',   () => { editor.toggle_heading(1); refresh(); });
+  document.getElementById('btn-h2').addEventListener('click',   () => { editor.toggle_heading(2); refresh(); });
+  document.getElementById('btn-h3').addEventListener('click',   () => { editor.toggle_heading(3); refresh(); });
+  document.getElementById('btn-para').addEventListener('click', () => { editor.set_block_type('paragraph'); refresh(); });
+
+  document.getElementById('btn-cursor').addEventListener('click', () => {
+    const pos = parseInt(document.getElementById('cursor-pos').value, 10);
+    editor.set_cursor(pos);
+    refresh();
+  });
+
+  document.getElementById('btn-select').addEventListener('click', () => {
+    const anchor = parseInt(document.getElementById('sel-anchor').value, 10);
+    const head   = parseInt(document.getElementById('sel-head').value,   10);
+    editor.set_selection(anchor, head);
+    refresh();
+  });
+
+  // 初期表示
+  refresh();
+</script>
+</body>
+</html>

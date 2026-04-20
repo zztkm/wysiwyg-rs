@@ -2,8 +2,15 @@
 name = "wysiwyg-core"
 version = "0.1.0"
 edition = "2021"
-description = "Platform-independent core for a WYSIWYG editor (document model, schema, transforms, state)"
-license = "MIT OR Apache-2.0"
+rust-version = "1.75"
+description = "Platform-independent WYSIWYG editor core — document model, schema, transforms, selection, state, undo/redo, commands"
+license = "MIT"
+authors = ["zztkm <zztkm@veltiosoft.com>"]
+repository = "https://github.com/zztkm/wysiwyg-rs"
+homepage = "https://github.com/zztkm/wysiwyg-rs"
+readme = "../../README.md"
+keywords = ["editor", "wysiwyg", "prosemirror", "document", "wasm"]
+categories = ["text-editors", "data-structures"]
 
 [dependencies]
 serde = { workspace = true }
@@ -12,15 +19,3 @@ unicode-segmentation = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
-
-[[example]]
-name = "basic_editing"
-path = "../../examples/basic_editing.rs"
-
-[[example]]
-name = "marks_and_headings"
-path = "../../examples/marks_and_headings.rs"
-
-[[example]]
-name = "undo_redo"
-path = "../../examples/undo_redo.rs"

@@ -229,6 +229,12 @@ pub struct WasmEditor {
     last_changed_range: Option<(usize, usize)>,
 }
 
+impl Default for WasmEditor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[wasm_bindgen]
 impl WasmEditor {
     /// Create a new editor with an empty document (basic schema).

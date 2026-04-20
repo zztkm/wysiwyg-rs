@@ -2,8 +2,9 @@
 name = "wysiwyg-wasm"
 version = "0.1.0"
 edition = "2021"
-description = "Wasm bindings for wysiwyg-rs"
-license = "MIT OR Apache-2.0"
+description = "WebAssembly bindings for wysiwyg-rs"
+license = "MIT"
+publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]

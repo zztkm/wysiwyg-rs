@@ -415,7 +415,7 @@ fn splice_at_depth(frag: &Fragment, gap: &Fragment, depth: usize) -> Result<Frag
         n
     });
 
-    let mut children: Vec<Arc<Node>> = frag.children[..last_idx].iter().cloned().collect();
+    let mut children: Vec<Arc<Node>> = frag.children[..last_idx].to_vec();
     children.push(new_last);
     Ok(Fragment::from_nodes(children))
 }

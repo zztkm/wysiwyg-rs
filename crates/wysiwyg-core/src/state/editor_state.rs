@@ -199,11 +199,7 @@ mod tests {
         if let Some(t) = &node.text {
             return t.to_string();
         }
-        node.content
-            .children
-            .iter()
-            .map(|c| collect_text(c))
-            .collect()
+        node.content.children.iter().map(collect_text).collect()
     }
 
     #[test]

@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>wysiwyg-rs — contenteditable サンプル</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, sans-serif;
+      background: #f5f5f5;
+      color: #222;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background: #1a1a2e;
+      color: #fff;
+      padding: 12px 20px;
+      font-size: 1.1rem;
+      font-weight: bold;
+      letter-spacing: 0.03em;
+    }
+
+    header span {
+      opacity: 0.6;
+      font-weight: normal;
+      font-size: 0.85rem;
+      margin-left: 10px;
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    /* ---- 左ペイン: エディタ ---- */
+    .editor-pane {
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid #ddd;
+      overflow: hidden;
+    }
+
+    .editor-header {
+      background: #f0f0f0;
+      border-bottom: 1px solid #ddd;
+      padding: 6px 14px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #666;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .editor-hint {
+      font-weight: normal;
+      text-transform: none;
+      letter-spacing: 0;
+      opacity: 0.7;
+    }
+
+    #editor {
+      flex: 1;
+      padding: 24px 32px;
+      overflow-y: auto;
+      line-height: 1.8;
+      font-size: 1rem;
+      outline: none;
+      caret-color: #3a86ff;
+      background: #fff;
+      white-space: pre-wrap;
+    }
+
+    #editor:focus-within {
+      box-shadow: inset 0 0 0 2px #3a86ff22;
+    }
+
+    #editor p   { margin-bottom: 0.5em; min-height: 1.8em; }
+    #editor h1  { font-size: 1.7em; font-weight: 700; margin-bottom: 0.3em; }
+    #editor h2  { font-size: 1.4em; font-weight: 700; margin-bottom: 0.3em; }
+    #editor h3  { font-size: 1.15em; font-weight: 700; margin-bottom: 0.3em; }
+    #editor strong { font-weight: 700; }
+    #editor em  { font-style: italic; }
+    #editor code { font-family: 'SF Mono', 'Fira Code', monospace; background: #eee; padding: 1px 4px; border-radius: 3px; }
+
+    /* ---- 右ペイン: Debug ---- */
+    .debug-pane {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .debug-header {
+      background: #f0f0f0;
+      border-bottom: 1px solid #ddd;
+      padding: 6px 14px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #666;
+      flex-shrink: 0;
+    }
+
+    .debug-section {
+      border-bottom: 1px solid #2e2e4e;
+      padding: 6px 12px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.78rem;
+      background: #1a1a2e;
+      color: #88aacc;
+      flex-shrink: 0;
+    }
+
+    .debug-section .label {
+      color: #66aaff;
+      font-weight: bold;
+    }
+
+    #doc-json {
+      flex: 1;
+      padding: 10px 14px;
+      overflow-y: auto;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.78rem;
+      white-space: pre;
+      background: #1a1a2e;
+      color: #a8d8ea;
+    }
+  </style>
+</head>
+<body>
+<header>
+  wysiwyg-rs WYSIWYG サンプル
+  <span>contenteditable + wasm-bindgen — 最小構成</span>
+</header>
+
+<main>
+  <div class="editor-pane">
+    <div class="editor-header">
+      エディタ
+      <span class="editor-hint">クリックして入力 / Enter で段落分割 / Backspace で削除 / # + スペースで見出し変換</span>
+    </div>
+    <div id="editor" contenteditable="true" spellcheck="false"></div>
+  </div>
+
+  <div class="debug-pane">
+    <div class="debug-header">デバッグ</div>
+    <div class="debug-section">
+      <span class="label">選択:</span>
+      <span id="sel-display">—</span>
+    </div>
+    <div class="debug-section">
+      <span class="label">バージョン:</span>
+      <span id="ver-display">0</span>
+      &nbsp;&nbsp;
+      <span class="label">変更範囲:</span>
+      <span id="range-display">—</span>
+    </div>
+    <div id="doc-json"></div>
+  </div>
+</main>
+
+<script type="module">
+  import init, { WasmEditor } from './pkg/wysiwyg_wasm.js';
+
+  await init();
+  const editor = new WasmEditor();
+
+  const editorEl = document.getElementById('editor');
+  const docJsonEl = document.getElementById('doc-json');
+  const selDisplay = document.getElementById('sel-display');
+  const verDisplay = document.getElementById('ver-display');
+  const rangeDisplay = document.getElementById('range-display');
+
+  // ---- 再入防止フラグ ----
+  // render() が innerHTML を書き換えると selectionchange が発火するので二重処理を防ぐ
+  let rendering = false;
+
+  // =========================================================================
+  // レンダリング
+  // =========================================================================
+
+  // 直前のドキュメントバージョン (差分検出用)
+  let lastDocVersion = -1;
+
+  function render() {
+    rendering = true;
+    try {
+      const docVersion = editor.get_doc_version();
+      const selJson = editor.get_selection();
+      const sel = JSON.parse(selJson);
+
+      // doc_version が変わった場合のみ DOM を再構築する
+      if (docVersion !== lastDocVersion) {
+        const changedRange = editor.get_changed_range(); // [from, to] | undefined
+        const docJson = editor.get_doc();
+        const doc = JSON.parse(docJson);
+
+        // TODO: changedRange を使ったブロック単位の差分更新 — 現時点は全体再構築で対応
+        const newHtml = renderDoc(doc);
+        editorEl.innerHTML = newHtml;
+
+        lastDocVersion = docVersion;
+        docJsonEl.textContent = JSON.stringify(doc, null, 2);
+
+        // バージョン・変更範囲をデバッグパネルに表示
+        verDisplay.textContent = String(docVersion);
+        if (changedRange) {
+          rangeDisplay.textContent = `[${changedRange[0]}, ${changedRange[1]}]`;
+        } else {
+          rangeDisplay.textContent = '—';
+        }
+      }
+
+      // カーソルを復元
+      restoreSelection(sel.anchor, sel.head);
+
+      // 選択表示を更新
+      if (sel.anchor === sel.head) {
+        selDisplay.textContent = `カーソル: ${sel.anchor}`;
+      } else {
+        selDisplay.textContent = `anchor=${sel.anchor}  head=${sel.head}`;
+      }
+    } finally {
+      rendering = false;
+    }
+  }
+
+  // =========================================================================
+  // ドキュメント → DOM
+  // =========================================================================
+
+  function renderDoc(doc) {
+    let html = '';
+    let blockOffset = 0; // ブロックの doc 内開始オフセット
+    for (const node of doc.content ?? []) {
+      const blockSize = nodeSize(node);
+      html += renderBlock(node, blockOffset);
+      blockOffset += blockSize;
+    }
+    return html || '<p data-block-offset="0" data-block-content-size="0"><br></p>';
+  }
+
+  function renderBlock(node, blockOffset) {
+    const inner = (node.content ?? []).map(renderInline).join('');
+    const contentSize = blockContentSize(node);
+    // data-block-offset: このブロックの doc 内の開始位置 (opening token の前)
+    // data-block-content-size: ブロック content の size
+    const attrs = `data-block-offset="${blockOffset}" data-block-content-size="${contentSize}"`;
+    switch (node.type) {
+      case 'paragraph':
+        return `<p ${attrs}>${inner || '<br>'}</p>`;
+      case 'heading': {
+        const lvl = node.attrs?.level ?? 1;
+        return `<h${lvl} ${attrs}>${inner || '<br>'}</h${lvl}>`;
+      }
+      case 'code_block':
+        return `<pre ${attrs}><code>${inner || '<br>'}</code></pre>`;
+      default:
+        return `<p ${attrs}>${inner || '<br>'}</p>`;
+    }
+  }
+
+  function renderInline(node) {
+    if (node.type !== 'text') return '';
+    let html = escapeHtml(node.text ?? '');
+    for (const mark of node.marks ?? []) {
+      switch (mark.type) {
+        case 'bold':   html = `<strong>${html}</strong>`; break;
+        case 'italic': html = `<em>${html}</em>`; break;
+        case 'code':   html = `<code>${html}</code>`; break;
+      }
+    }
+    return html;
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  /** ノードの doc 内 node_size を計算 (branch: content_size + 2, text: char count) */
+  function nodeSize(node) {
+    if (node.type === 'text') return [...(node.text ?? '')].length;
+    return blockContentSize(node) + 2;
+  }
+
+  function blockContentSize(node) {
+    return (node.content ?? []).reduce((acc, c) => acc + nodeSize(c), 0);
+  }
+
+  // =========================================================================
+  // DOM → doc position
+  // =========================================================================
+
+  /**
+   * DOM の node + offset を doc position に変換する。
+   * editorEl 直下のブロック要素の data-block-offset を基点に計算する。
+   */
+  function domToDocPos(domNode, offset) {
+    // editorEl 直下のブロック要素を探す
+    const blockEl = findBlockElement(domNode);
+    if (!blockEl) return null;
+
+    const blockOffset = parseInt(blockEl.dataset.blockOffset ?? '0', 10);
+    const contentStart = blockOffset + 1; // opening token の 1 つ後
+
+    // ブロック内のテキストオフセットを計算
+    const innerOffset = domOffsetToInner(blockEl, domNode, offset);
+    if (innerOffset === null) return null;
+
+    return contentStart + innerOffset;
+  }
+
+  /** domNode の先祖をたどり editorEl 直下のブロック要素を見つける */
+  function findBlockElement(node) {
+    let cur = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+    while (cur && cur !== editorEl) {
+      if (cur.parentElement === editorEl) return cur;
+      cur = cur.parentElement;
+    }
+    return null;
+  }
+
+  /**
+   * ブロック要素内のテキストオフセット (char 単位) を計算する。
+   * blockEl のテキストノードを順に走査し、target に達した時点のオフセットを返す。
+   */
+  function domOffsetToInner(blockEl, targetNode, targetOffset) {
+    // <br> のみの空段落対応
+    if (targetNode === blockEl && targetOffset === 0) return 0;
+
+    let charOffset = 0;
+    const walker = document.createTreeWalker(blockEl, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode()) !== null) {
+      if (node === targetNode) {
+        return charOffset + targetOffset;
+      }
+      charOffset += [...node.textContent].length;
+    }
+    // ブロック要素自体が target の場合 (子要素をクリックした場合など)
+    return charOffset;
+  }
+
+  // =========================================================================
+  // doc position → DOM
+  // =========================================================================
+
+  /**
+   * doc position をブロック要素内の (DOM テキストノード, char offset) に変換する。
+   * 返り値: { node: Text, offset: number } または null
+   */
+  function docPosToDOM(pos) {
+    for (const blockEl of editorEl.children) {
+      const blockOffset = parseInt(blockEl.dataset.blockOffset ?? '0', 10);
+      const contentSize = parseInt(blockEl.dataset.blockContentSize ?? '0', 10);
+      const innerStart = blockOffset + 1;
+      const innerEnd = innerStart + contentSize;
+
+      if (pos >= innerStart && pos <= innerEnd) {
+        const innerOffset = pos - innerStart;
+        return innerOffsetToDOM(blockEl, innerOffset);
+      }
+    }
+    // doc 先頭または末尾
+    if (pos === 0 && editorEl.children.length > 0) {
+      return innerOffsetToDOM(editorEl.children[0], 0);
+    }
+    return null;
+  }
+
+  function innerOffsetToDOM(blockEl, innerOffset) {
+    // <br> のみの空段落
+    const br = blockEl.querySelector('br');
+    if (br && blockEl.textContent.trim() === '') {
+      return { node: blockEl, offset: 0 };
+    }
+
+    let remaining = innerOffset;
+    const walker = document.createTreeWalker(blockEl, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode()) !== null) {
+      const len = [...node.textContent].length;
+      if (remaining <= len) {
+        // Unicode 対応: char offset → UTF-16 code unit offset
+        const utf16Offset = [...node.textContent].slice(0, remaining).join('').length;
+        return { node, offset: utf16Offset };
+      }
+      remaining -= len;
+    }
+    // ブロック末尾 (すべてのテキストを過ぎた場合)
+    if (node) {
+      return { node, offset: node.textContent.length };
+    }
+    return { node: blockEl, offset: blockEl.childNodes.length };
+  }
+
+  // =========================================================================
+  // カーソル復元
+  // =========================================================================
+
+  function restoreSelection(anchor, head) {
+    const sel = window.getSelection();
+    if (!sel) return;
+    sel.removeAllRanges();
+
+    const anchorPos = docPosToDOM(anchor);
+    if (!anchorPos) return;
+
+    const range = document.createRange();
+    try {
+      range.setStart(anchorPos.node, anchorPos.offset);
+
+      if (anchor !== head) {
+        const headPos = docPosToDOM(head);
+        if (headPos) {
+          range.setEnd(headPos.node, headPos.offset);
+        } else {
+          range.collapse(true);
+        }
+      } else {
+        range.collapse(true);
+      }
+
+      sel.addRange(range);
+    } catch (e) {
+      // 位置が無効な場合は最初のブロック先頭に fallback
+      const first = editorEl.children[0];
+      if (first) {
+        const r = document.createRange();
+        r.setStart(first, 0);
+        r.collapse(true);
+        sel.addRange(r);
+      }
+    }
+  }
+
+  // =========================================================================
+  // Markdown 見出し変換
+  // =========================================================================
+
+  /** ブロックノードのテキストを再帰的に連結して返す */
+  function getBlockText(node) {
+    if (node.type === 'text') return node.text ?? '';
+    return (node.content ?? []).map(getBlockText).join('');
+  }
+
+  /**
+   * カーソルがある段落のテキストが `^#{1,6} ` で始まる場合、
+   * 見出しに変換してプレフィックスを削除する。
+   * スペースを入力した直後に呼び出す。
+   */
+  function applyMarkdownHeading() {
+    const doc = JSON.parse(editor.get_doc());
+    const sel = JSON.parse(editor.get_selection());
+    const cursorPos = sel.anchor;
+
+    let blockOffset = 0;
+    for (const block of doc.content ?? []) {
+      const bSize = nodeSize(block);
+      const innerStart = blockOffset + 1;
+      const innerEnd = innerStart + blockContentSize(block);
+
+      if (cursorPos > blockOffset && cursorPos <= blockOffset + bSize) {
+        if (block.type !== 'paragraph') break; // 段落以外はスキップ
+
+        const text = getBlockText(block);
+        const match = text.match(/^(#{1,6}) /);
+        if (!match) break;
+
+        const level = match[1].length;
+        const prefixLen = level + 1; // "# " = 2, "## " = 3 ...
+
+        // カーソルがプレフィックス直後にある場合のみ変換
+        if (cursorPos !== innerStart + prefixLen) break;
+
+        editor.toggle_heading(level);
+
+        // プレフィックスを削除して見出し先頭にカーソルを置く
+        editor.set_selection(innerStart, innerStart + prefixLen);
+        editor.delete_selection();
+        editor.set_cursor(innerStart);
+        break;
+      }
+
+      blockOffset += bSize;
+    }
+  }
+
+  // =========================================================================
+  // イベントハンドラ
+  // =========================================================================
+
+  // selectionchange: DOM selection を wasm editor に同期する
+  document.addEventListener('selectionchange', () => {
+    if (rendering) return;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+    if (!editorEl.contains(sel.anchorNode)) return;
+
+    const anchor = domToDocPos(sel.anchorNode, sel.anchorOffset);
+    const head   = domToDocPos(sel.focusNode,  sel.focusOffset);
+    if (anchor === null || head === null) return;
+
+    editor.set_selection(anchor, head);
+
+    // 選択表示のみ更新 (re-render しない)
+    const selJson = editor.get_selection();
+    const s = JSON.parse(selJson);
+    if (s.anchor === s.head) {
+      selDisplay.textContent = `カーソル: ${s.anchor}`;
+    } else {
+      selDisplay.textContent = `anchor=${s.anchor}  head=${s.head}`;
+    }
+    // 変更範囲は render() 内でのみ更新する (ここでクリアすると render 後に即消える)
+  });
+
+  // beforeinput: ブラウザのデフォルト入力をすべて横取りして wasm に委譲する
+  editorEl.addEventListener('beforeinput', (e) => {
+    e.preventDefault();
+
+    switch (e.inputType) {
+      case 'insertText':
+        if (e.data) {
+          editor.insert_text(e.data);
+          if (e.data === ' ') applyMarkdownHeading();
+          render();
+        }
+        break;
+
+      case 'insertParagraph':
+      case 'insertLineBreak':
+        editor.split_block();
+        render();
+        break;
+
+      case 'deleteContentBackward':
+        editor.backspace();
+        render();
+        break;
+
+      case 'deleteContentForward':
+        // TODO: delete_forward コマンドが未実装 — wysiwyg-core に forward delete を追加する必要がある
+        break;
+
+      // TODO: IME (compositionstart/compositionend) は未対応 — insertCompositionText を適切に処理する必要がある
+      // TODO: paste/drop (insertFromPaste, insertFromDrop) は未対応
+      default:
+        break;
+    }
+  });
+
+  // =========================================================================
+  // 初期表示
+  // =========================================================================
+  render();
+  editorEl.focus();
+</script>
+</body>
+</html>

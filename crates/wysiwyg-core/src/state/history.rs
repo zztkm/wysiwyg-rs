@@ -86,16 +86,16 @@ impl HistoryState {
     ///
     /// Returns the new `HistoryState` and a completed `Transaction` that
     /// contains the inverse steps.  Returns `None` if the stack is empty.
-    pub fn undo<'a>(
+    pub fn undo(
         &self,
-        state: &'a super::editor_state::EditorState,
+        state: &super::editor_state::EditorState,
     ) -> Option<(HistoryState, Transaction)> {
         let item = self.undo_stack.last()?;
 
         let mut tr = state.transaction();
         // Apply inverse steps in reverse order.
         for step in item.inverse_steps.iter().rev() {
-            if let Err(_) = tr.step(step.clone()) {
+            if tr.step(step.clone()).is_err() {
                 return None; // step failed — history may be corrupted
             }
         }
@@ -127,15 +127,15 @@ impl HistoryState {
     }
 
     /// Redo the last undone action.
-    pub fn redo<'a>(
+    pub fn redo(
         &self,
-        state: &'a super::editor_state::EditorState,
+        state: &super::editor_state::EditorState,
     ) -> Option<(HistoryState, Transaction)> {
         let item = self.redo_stack.last()?;
 
         let mut tr = state.transaction();
         for step in item.inverse_steps.iter().rev() {
-            if let Err(_) = tr.step(step.clone()) {
+            if tr.step(step.clone()).is_err() {
                 return None;
             }
         }
