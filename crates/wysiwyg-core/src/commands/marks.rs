@@ -95,7 +95,8 @@ fn check_fragment_has_mark(
             } else {
                 let inner_from = from.saturating_sub(offset + 1);
                 let inner_to = to.saturating_sub(offset + 1).min(child.content.size);
-                let sub_found = check_fragment_has_mark(&child.content, inner_from, inner_to, type_id);
+                let sub_found =
+                    check_fragment_has_mark(&child.content, inner_from, inner_to, type_id);
                 if !sub_found {
                     all_marked = false;
                 }
@@ -118,8 +119,8 @@ fn check_fragment_has_mark(
 mod tests {
     use super::*;
     use crate::{
-        model::{node::Fragment, mark::MarkSet, node::Node},
         model::schema::basic_schema,
+        model::{mark::MarkSet, node::Fragment, node::Node},
         state::{EditorState, Selection},
     };
     use std::sync::Arc;

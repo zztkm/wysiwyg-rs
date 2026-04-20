@@ -31,7 +31,10 @@ use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
 use wysiwyg_core::{
-    commands::{insert_text, set_block_type, toggle_bold, toggle_code, toggle_italic, toggle_heading},
+    commands::{
+        backspace, delete_selection, insert_text, set_block_type, split_block, toggle_bold,
+        toggle_code, toggle_heading, toggle_italic,
+    },
     model::{
         attrs::{AttrValue, Attrs},
         mark::{Mark, MarkSet},
@@ -114,9 +117,7 @@ fn node_to_json(node: &Node, schema: &Schema) -> serde_json::Value {
 fn json_attr_value(val: &serde_json::Value) -> AttrValue {
     match val {
         serde_json::Value::String(s) => AttrValue::String(Arc::from(s.as_str())),
-        serde_json::Value::Number(n) => {
-            AttrValue::Int(n.as_i64().unwrap_or(0))
-        }
+        serde_json::Value::Number(n) => AttrValue::Int(n.as_i64().unwrap_or(0)),
         serde_json::Value::Bool(b) => AttrValue::Bool(*b),
         _ => AttrValue::Null,
     }
@@ -223,6 +224,9 @@ fn json_to_node(val: &serde_json::Value, schema: &Schema) -> Result<Arc<Node>, S
 #[wasm_bindgen]
 pub struct WasmEditor {
     state: EditorState,
+    /// 最後に dispatch されたトランザクションの変更範囲 (最終ドキュメント座標)。
+    /// set_cursor / set_selection では None にリセットされる。
+    last_changed_range: Option<(usize, usize)>,
 }
 
 #[wasm_bindgen]
@@ -232,7 +236,10 @@ impl WasmEditor {
     pub fn new() -> WasmEditor {
         let schema = basic_schema();
         let state = EditorState::with_empty_doc(schema);
-        WasmEditor { state }
+        WasmEditor {
+            state,
+            last_changed_range: None,
+        }
     }
 
     /// Create an editor from a JSON document string.
@@ -240,11 +247,13 @@ impl WasmEditor {
     /// Returns an error string if the JSON is invalid or references unknown types.
     pub fn from_doc(doc_json: &str) -> Result<WasmEditor, String> {
         let schema = basic_schema();
-        let val: serde_json::Value =
-            serde_json::from_str(doc_json).map_err(|e| e.to_string())?;
+        let val: serde_json::Value = serde_json::from_str(doc_json).map_err(|e| e.to_string())?;
         let doc = json_to_node(&val, &schema)?;
         let state = EditorState::new(schema, doc, Selection::cursor(1));
-        Ok(WasmEditor { state })
+        Ok(WasmEditor {
+            state,
+            last_changed_range: None,
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -271,6 +280,7 @@ impl WasmEditor {
         if let Ok(new_state) = self.state.apply(&tr) {
             self.state = new_state;
         }
+        self.last_changed_range = None;
     }
 
     /// Set the selection to `[anchor, head)`.
@@ -280,6 +290,7 @@ impl WasmEditor {
         if let Ok(new_state) = self.state.apply(&tr) {
             self.state = new_state;
         }
+        self.last_changed_range = None;
     }
 
     // -----------------------------------------------------------------------
@@ -289,6 +300,21 @@ impl WasmEditor {
     /// Insert `text` at the current selection. Returns `true` on success.
     pub fn insert_text(&mut self, text: &str) -> bool {
         self.dispatch(insert_text(&self.state, text))
+    }
+
+    /// カーソル左の 1 文字を削除する。選択がある場合は選択範囲を削除する。
+    pub fn backspace(&mut self) -> bool {
+        self.dispatch(backspace(&self.state))
+    }
+
+    /// 現在の選択範囲を削除する。カーソルの場合は何もしない。
+    pub fn delete_selection(&mut self) -> bool {
+        self.dispatch(delete_selection(&self.state))
+    }
+
+    /// カーソル位置でブロックを分割し、新しい段落を作成する。
+    pub fn split_block(&mut self) -> bool {
+        self.dispatch(split_block(&self.state))
     }
 
     // -----------------------------------------------------------------------
@@ -361,11 +387,29 @@ impl WasmEditor {
 impl WasmEditor {
     fn dispatch(&mut self, tr: Option<wysiwyg_core::state::Transaction>) -> bool {
         if let Some(tr) = tr {
+            let range = tr.changed_range();
             if let Ok(new_state) = self.state.apply(&tr) {
                 self.state = new_state;
+                self.last_changed_range = range;
                 return true;
             }
         }
         false
+    }
+}
+
+#[wasm_bindgen]
+impl WasmEditor {
+    /// ドキュメントが変更されるたびに単調増加するバージョン番号を返す。
+    /// 差分更新の O(1) 変更検出に使用できる。
+    pub fn get_doc_version(&self) -> u32 {
+        self.state.doc_version as u32
+    }
+
+    /// 最後のコマンドが変更した範囲を `[from, to]` として返す。
+    /// カーソル移動のみの場合や変更がない場合は `undefined` を返す。
+    pub fn get_changed_range(&self) -> Option<Box<[usize]>> {
+        self.last_changed_range
+            .map(|(f, t)| vec![f, t].into_boxed_slice())
     }
 }

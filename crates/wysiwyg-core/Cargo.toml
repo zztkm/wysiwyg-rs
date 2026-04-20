@@ -12,3 +12,15 @@ unicode-segmentation = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+
+[[example]]
+name = "basic_editing"
+path = "../../examples/basic_editing.rs"
+
+[[example]]
+name = "marks_and_headings"
+path = "../../examples/marks_and_headings.rs"
+
+[[example]]
+name = "undo_redo"
+path = "../../examples/undo_redo.rs"

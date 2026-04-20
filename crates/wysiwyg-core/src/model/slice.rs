@@ -69,11 +69,7 @@ mod tests {
 
     #[test]
     fn slice_size() {
-        let s = Slice::new(
-            Fragment::from_node(text_node("hello")),
-            0,
-            0,
-        );
+        let s = Slice::new(Fragment::from_node(text_node("hello")), 0, 0);
         assert_eq!(s.size(), 5);
     }
 }

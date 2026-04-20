@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use crate::model::{node::{Fragment, Node}, slice::Slice};
+use crate::model::{
+    node::{Fragment, Node},
+    slice::Slice,
+};
 
 use super::{
     step::{Step, StepError, StepResult},
@@ -132,8 +135,7 @@ fn replace_in_fragment(
                     n.content = new_child_content;
                     n
                 });
-                let mut children: Vec<Arc<Node>> =
-                    fragment.children.iter().cloned().collect();
+                let mut children: Vec<Arc<Node>> = fragment.children.iter().cloned().collect();
                 children[i] = new_child;
                 return Ok(Fragment::from_nodes(children));
             }
@@ -395,8 +397,9 @@ fn split_at_range(
                 before.push(Arc::new(n));
             }
 
-            if to >= inner_start && to <= child_end {
-                // `to` is inside this child — right part goes into `after`.
+            if to >= inner_start && to < child_end {
+                // `to` is strictly inside this child — right part goes into `after`.
+                // When to == child_end the node is completely consumed by the range.
                 let inner_cut = to.saturating_sub(inner_start);
                 let right_content = child.content.cut(inner_cut, child.content.size);
                 let mut n = (**child).clone();
@@ -450,7 +453,11 @@ fn extract_fragment(fragment: &Fragment, from: usize, to: usize) -> Fragment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{attrs::Attrs, mark::MarkSet, node::{Fragment, Node, NodeTypeId}};
+    use crate::model::{
+        attrs::Attrs,
+        mark::MarkSet,
+        node::{Fragment, Node, NodeTypeId},
+    };
 
     const DOC_TYPE: NodeTypeId = NodeTypeId(0);
     const PARA_TYPE: NodeTypeId = NodeTypeId(1);
@@ -619,11 +626,7 @@ mod tests {
         // doc.content.size = 13, so position 13 is the end.
         let d = simple_doc();
         let new_para = para(vec![text_node("second")]);
-        let step = ReplaceStep::new(
-            13,
-            13,
-            Slice::new(Fragment::from_node(new_para), 0, 0),
-        );
+        let step = ReplaceStep::new(13, 13, Slice::new(Fragment::from_node(new_para), 0, 0));
         let (new_doc, _map) = step.apply(&d).unwrap();
         assert_eq!(collect_text(&new_doc), "hello worldsecond");
         assert_eq!(new_doc.child_count(), 2);
@@ -641,7 +644,10 @@ mod tests {
         //     content at 8..13
         // To merge: from=6 (end of para1 content), to=8 (start of para2 content)
         // Slice: empty, open_start=1, open_end=1
-        let d = doc(vec![para(vec![text_node("hello")]), para(vec![text_node("world")])]);
+        let d = doc(vec![
+            para(vec![text_node("hello")]),
+            para(vec![text_node("world")]),
+        ]);
         assert_eq!(d.content.size, 14);
 
         let step = ReplaceStep::new(6, 8, Slice::new(Fragment::empty(), 1, 1));

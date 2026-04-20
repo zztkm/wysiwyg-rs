@@ -149,15 +149,11 @@ impl Schema {
             })
             .collect();
 
-        let node_by_name: HashMap<Arc<str>, NodeTypeId> = nodes
-            .iter()
-            .map(|nt| (nt.name.clone(), nt.id))
-            .collect();
+        let node_by_name: HashMap<Arc<str>, NodeTypeId> =
+            nodes.iter().map(|nt| (nt.name.clone(), nt.id)).collect();
 
-        let mark_by_name: HashMap<Arc<str>, MarkTypeId> = marks
-            .iter()
-            .map(|mt| (mt.name.clone(), mt.id))
-            .collect();
+        let mark_by_name: HashMap<Arc<str>, MarkTypeId> =
+            marks.iter().map(|mt| (mt.name.clone(), mt.id)).collect();
 
         let top_node = nodes
             .first()

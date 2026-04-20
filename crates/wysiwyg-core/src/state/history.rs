@@ -1,9 +1,4 @@
-use crate::{
-    transform::{
-        step::Step,
-        step_map::Mapping,
-    },
-};
+use crate::transform::{step::Step, step_map::Mapping};
 
 use super::{selection::Selection, transaction::Transaction};
 

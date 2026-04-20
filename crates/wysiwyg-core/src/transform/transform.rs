@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
-use crate::model::{mark::Mark, node::{Fragment, Node}, slice::Slice};
+use crate::model::{
+    mark::Mark,
+    node::{Fragment, Node},
+    slice::Slice,
+};
 
 use super::{
     mark_step::{AddMarkStep, RemoveMarkStep},
@@ -52,7 +56,12 @@ impl Transform {
     // -----------------------------------------------------------------------
 
     /// Replace the range `[from..to)` with `slice`.
-    pub fn replace(&mut self, from: usize, to: usize, slice: Slice) -> Result<&mut Self, StepError> {
+    pub fn replace(
+        &mut self,
+        from: usize,
+        to: usize,
+        slice: Slice,
+    ) -> Result<&mut Self, StepError> {
         self.step(Step::Replace(ReplaceStep::new(from, to, slice)))
     }
 
@@ -72,13 +81,55 @@ impl Transform {
     }
 
     /// Remove `mark` from all inline content in `[from..to)`.
-    pub fn remove_mark(&mut self, from: usize, to: usize, mark: Mark) -> Result<&mut Self, StepError> {
+    pub fn remove_mark(
+        &mut self,
+        from: usize,
+        to: usize,
+        mark: Mark,
+    ) -> Result<&mut Self, StepError> {
         self.step(Step::RemoveMark(RemoveMarkStep::new(from, to, mark)))
     }
 
     /// Whether the transform has changed the document.
     pub fn doc_changed(&self) -> bool {
         !self.steps.is_empty()
+    }
+
+    /// 全ステップが最終ドキュメントに与えた変更の境界ボックスを返す。
+    ///
+    /// 各ステップが生成したポスト適用範囲を後続ステップのマッピングで最終ドキュメント座標へ
+    /// 変換し、全ステップの最小 from・最大 to を返す。
+    /// ステップがない場合は `None`。
+    pub fn changed_range(&self) -> Option<(usize, usize)> {
+        if self.steps.is_empty() {
+            return None;
+        }
+        let maps = self.mapping.maps();
+        let mut min_from = usize::MAX;
+        let mut max_to = 0usize;
+
+        for (i, step) in self.steps.iter().enumerate() {
+            let (from, to) = match step {
+                Step::Replace(rs) => (rs.from, rs.from + rs.slice.size()),
+                Step::AddMark(s) => (s.from, s.to),
+                Step::RemoveMark(s) => (s.from, s.to),
+                Step::ReplaceAround(s) => (s.from, s.to),
+            };
+            let mut mapped_from = from;
+            let mut mapped_to = to;
+            for map in &maps[i + 1..] {
+                mapped_from = map.map_left(mapped_from);
+                mapped_to = map.map_right(mapped_to);
+            }
+            if mapped_from < min_from {
+                min_from = mapped_from;
+            }
+            if mapped_to > max_to {
+                max_to = mapped_to;
+            }
+        }
+
+        Some((min_from, max_to))
     }
 
     /// The accumulated `Mapping`.
@@ -100,7 +151,11 @@ impl Transform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{attrs::Attrs, mark::MarkSet, node::{Node, NodeTypeId}};
+    use crate::model::{
+        attrs::Attrs,
+        mark::MarkSet,
+        node::{Node, NodeTypeId},
+    };
 
     const DOC_TYPE: NodeTypeId = NodeTypeId(0);
     const PARA_TYPE: NodeTypeId = NodeTypeId(1);
@@ -145,7 +200,8 @@ mod tests {
         let mut tr = Transform::new(d);
 
         // Insert " world" at pos 6 (after "hello" inside the para).
-        tr.insert(6, Fragment::from_node(text_node(" world"))).unwrap();
+        tr.insert(6, Fragment::from_node(text_node(" world")))
+            .unwrap();
         assert_eq!(collect_text(&tr.doc), "hello world");
 
         // Delete the first word "hello " (now at positions 1..7).
@@ -169,8 +225,12 @@ mod tests {
     fn replace_convenience() {
         let d = simple_doc();
         let mut tr = Transform::new(d);
-        tr.replace(1, 6, Slice::new(Fragment::from_node(text_node("world")), 0, 0))
-            .unwrap();
+        tr.replace(
+            1,
+            6,
+            Slice::new(Fragment::from_node(text_node("world")), 0, 0),
+        )
+        .unwrap();
         assert_eq!(collect_text(&tr.doc), "world");
     }
 
@@ -194,6 +254,45 @@ mod tests {
         // Document and step list are unchanged.
         assert_eq!(tr.doc, d);
         assert!(!tr.doc_changed());
+    }
+
+    #[test]
+    fn changed_range_single_insert() {
+        let d = simple_doc(); // "hello", content at 1..6
+        let mut tr = Transform::new(d);
+        tr.insert(3, Fragment::from_node(text_node("XX"))).unwrap();
+        // 位置 3 に "XX"(size=2) を挿入 → 出力範囲は (3, 5)
+        assert_eq!(tr.changed_range(), Some((3, 5)));
+    }
+
+    #[test]
+    fn changed_range_delete() {
+        let d = simple_doc();
+        let mut tr = Transform::new(d);
+        tr.delete(2, 4).unwrap();
+        // 削除 → 出力は空点 (2, 2)
+        assert_eq!(tr.changed_range(), Some((2, 2)));
+    }
+
+    #[test]
+    fn changed_range_two_steps_bounding_box() {
+        let d = simple_doc();
+        let mut tr = Transform::new(d);
+        // Step 0: insert "AB" at pos 1 → 最終ドキュメントで (1, 3)
+        tr.insert(1, Fragment::from_node(text_node("AB"))).unwrap();
+        // Step 1: insert "CD" at pos 9 → 最終ドキュメントで (9, 11)
+        tr.insert(9, Fragment::from_node(text_node("CD"))).unwrap();
+        // bounding box は (1, 11)
+        let (from, to) = tr.changed_range().unwrap();
+        assert_eq!(from, 1);
+        assert_eq!(to, 11);
+    }
+
+    #[test]
+    fn changed_range_none_when_no_steps() {
+        let d = simple_doc();
+        let tr = Transform::new(d);
+        assert_eq!(tr.changed_range(), None);
     }
 
     #[test]

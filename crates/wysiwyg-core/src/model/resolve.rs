@@ -136,7 +136,11 @@ impl ResolvedPos {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{attrs::Attrs, mark::MarkSet, node::{Fragment, Node, NodeTypeId}};
+    use crate::model::{
+        attrs::Attrs,
+        mark::MarkSet,
+        node::{Fragment, Node, NodeTypeId},
+    };
 
     const DOC_TYPE: NodeTypeId = NodeTypeId(0);
     const PARA_TYPE: NodeTypeId = NodeTypeId(1);

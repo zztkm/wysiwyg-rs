@@ -14,10 +14,7 @@ impl StepMap {
     /// Construct from `(old_pos, old_size, new_size)` triples.
     pub fn from_ranges(ranges: impl IntoIterator<Item = (usize, usize, usize)>) -> Self {
         StepMap {
-            ranges: ranges
-                .into_iter()
-                .flat_map(|(p, o, n)| [p, o, n])
-                .collect(),
+            ranges: ranges.into_iter().flat_map(|(p, o, n)| [p, o, n]).collect(),
         }
     }
 

@@ -5,11 +5,7 @@ use crate::{
     transform::step::StepError,
 };
 
-use super::{
-    history::HistoryState,
-    selection::Selection,
-    transaction::Transaction,
-};
+use super::{history::HistoryState, selection::Selection, transaction::Transaction};
 
 /// Errors that can occur when applying a transaction.
 #[derive(Debug, Clone)]
@@ -55,6 +51,9 @@ pub struct EditorState {
     pub selection: Selection,
     /// Undo/redo history (Phase 2 — directly embedded, no plugin indirection).
     pub history: HistoryState,
+    /// ドキュメントが変更されるたびに単調増加するバージョン番号。
+    /// 差分更新の O(1) 変更検出に使用する。
+    pub doc_version: u64,
 }
 
 impl EditorState {
@@ -67,6 +66,7 @@ impl EditorState {
             doc,
             selection,
             history: HistoryState::new(),
+            doc_version: 0,
         }
     }
 
@@ -74,7 +74,11 @@ impl EditorState {
     ///
     /// The document is `doc -> [paragraph -> []]` — a single empty paragraph.
     pub fn with_empty_doc(schema: Arc<Schema>) -> Self {
-        use crate::model::{attrs::Attrs, mark::MarkSet, node::{Fragment, Node}};
+        use crate::model::{
+            attrs::Attrs,
+            mark::MarkSet,
+            node::{Fragment, Node},
+        };
 
         let para_type = schema
             .node_type_by_name("paragraph")
@@ -101,12 +105,17 @@ impl EditorState {
             doc,
             selection: Selection::cursor(1), // inside the empty paragraph
             history: HistoryState::new(),
+            doc_version: 0,
         }
     }
 
     /// Start a new transaction based on the current state.
     pub fn transaction(&self) -> Transaction {
-        Transaction::new(self.doc.clone(), self.schema.clone(), self.selection.clone())
+        Transaction::new(
+            self.doc.clone(),
+            self.schema.clone(),
+            self.selection.clone(),
+        )
     }
 
     /// Apply a transaction, returning the next `EditorState`.
@@ -128,6 +137,11 @@ impl EditorState {
             doc: new_doc,
             selection: new_selection,
             history: new_history,
+            doc_version: if tr.doc_changed() {
+                self.doc_version.wrapping_add(1)
+            } else {
+                self.doc_version
+            },
         })
     }
 
@@ -146,6 +160,7 @@ impl EditorState {
             doc: new_doc,
             selection: new_selection,
             history: new_history,
+            doc_version: self.doc_version.wrapping_add(1),
         })
     }
 
@@ -160,6 +175,7 @@ impl EditorState {
             doc: new_doc,
             selection: new_selection,
             history: new_history,
+            doc_version: self.doc_version.wrapping_add(1),
         })
     }
 
@@ -183,7 +199,11 @@ mod tests {
         if let Some(t) = &node.text {
             return t.to_string();
         }
-        node.content.children.iter().map(|c| collect_text(c)).collect()
+        node.content
+            .children
+            .iter()
+            .map(|c| collect_text(c))
+            .collect()
     }
 
     #[test]
@@ -196,7 +216,10 @@ mod tests {
 
     #[test]
     fn apply_transaction_updates_doc() {
-        use crate::model::{node::{Fragment, Node}, mark::MarkSet};
+        use crate::model::{
+            mark::MarkSet,
+            node::{Fragment, Node},
+        };
 
         let schema = basic_schema();
         let state = EditorState::with_empty_doc(schema.clone());
@@ -214,7 +237,7 @@ mod tests {
 
     #[test]
     fn undo_reverts_change() {
-        use crate::model::{node::Fragment, mark::MarkSet, node::Node};
+        use crate::model::{mark::MarkSet, node::Fragment, node::Node};
 
         let schema = basic_schema();
         let state = EditorState::with_empty_doc(schema.clone());
@@ -233,7 +256,7 @@ mod tests {
 
     #[test]
     fn redo_after_undo() {
-        use crate::model::{node::Fragment, mark::MarkSet, node::Node};
+        use crate::model::{mark::MarkSet, node::Fragment, node::Node};
 
         let schema = basic_schema();
         let state = EditorState::with_empty_doc(schema.clone());
@@ -253,7 +276,7 @@ mod tests {
 
     #[test]
     fn transaction_not_added_to_history_when_flagged() {
-        use crate::model::{node::Fragment, mark::MarkSet, node::Node};
+        use crate::model::{mark::MarkSet, node::Fragment, node::Node};
         use crate::state::transaction::MetaValue;
 
         let schema = basic_schema();

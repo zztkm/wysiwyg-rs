@@ -50,7 +50,7 @@ pub fn resolve_text_pos(doc: &Arc<Node>, pm_pos: usize) -> Option<(u32, u32)> {
     let mut offset = 0usize;
     for (idx, child) in doc.content.children.iter().enumerate() {
         let child_size = child.node_size(); // e.g. para: text_size + 2
-        // Text positions inside this block: [offset+1 .. offset+child_size-1]
+                                            // Text positions inside this block: [offset+1 .. offset+child_size-1]
         let text_start = offset + 1;
         let text_end = offset + child_size - 1; // exclusive end = offset + 1 + content_size
         if pm_pos >= text_start && pm_pos <= text_end {
@@ -91,8 +91,12 @@ pub fn build_pm_doc_from_yrs<T: ReadTxn>(
 
     let len = content.len(txn);
     for i in 0..len {
-        let Some(child) = content.get(txn, i) else { continue };
-        let XmlOut::Element(elem) = child else { continue };
+        let Some(child) = content.get(txn, i) else {
+            continue;
+        };
+        let XmlOut::Element(elem) = child else {
+            continue;
+        };
         if elem.tag().as_ref() != "paragraph" {
             continue;
         }
@@ -115,7 +119,11 @@ pub fn build_pm_doc_from_yrs<T: ReadTxn>(
                 MarkSet::empty(),
             ))
         } else {
-            let text_node = Arc::new(Node::text(text_type.id, text_content.as_str(), MarkSet::empty()));
+            let text_node = Arc::new(Node::text(
+                text_type.id,
+                text_content.as_str(),
+                MarkSet::empty(),
+            ));
             Arc::new(Node::new(
                 para_type.id,
                 Attrs::empty(),
@@ -187,10 +195,7 @@ impl CollabState {
     /// steps to the yrs document.
     ///
     /// Returns `true` if the transaction was applied successfully.
-    pub fn apply_transaction(
-        &mut self,
-        tr: wysiwyg_core::state::Transaction,
-    ) -> bool {
+    pub fn apply_transaction(&mut self, tr: wysiwyg_core::state::Transaction) -> bool {
         let doc_before = self.editor.doc.clone();
         match self.editor.apply(&tr) {
             Ok(new_state) => {
@@ -369,15 +374,25 @@ mod tests {
         let para_type = schema.node_type_by_name("paragraph").unwrap();
         let doc_type = schema.node_type_by_name("doc").unwrap();
         let text_node = Arc::new(Node::text(text_type.id, "hello", MarkSet::empty()));
-        let para = Arc::new(Node::new(para_type.id, Attrs::empty(), Fragment::from_node(text_node), MarkSet::empty()));
-        let doc = Arc::new(Node::new(doc_type.id, Attrs::empty(), Fragment::from_node(para), MarkSet::empty()));
+        let para = Arc::new(Node::new(
+            para_type.id,
+            Attrs::empty(),
+            Fragment::from_node(text_node),
+            MarkSet::empty(),
+        ));
+        let doc = Arc::new(Node::new(
+            doc_type.id,
+            Attrs::empty(),
+            Fragment::from_node(para),
+            MarkSet::empty(),
+        ));
 
-        assert_eq!(resolve_text_pos(&doc, 0), None);        // doc-level gap before para
+        assert_eq!(resolve_text_pos(&doc, 0), None); // doc-level gap before para
         assert_eq!(resolve_text_pos(&doc, 1), Some((0, 0))); // before 'h'
         assert_eq!(resolve_text_pos(&doc, 3), Some((0, 2))); // before 'l'
         assert_eq!(resolve_text_pos(&doc, 5), Some((0, 4))); // before 'o'
         assert_eq!(resolve_text_pos(&doc, 6), Some((0, 5))); // after 'o' (end-of-para cursor)
-        // Position 7 would be outside doc.content.size=7 range, handled by caller
+                                                             // Position 7 would be outside doc.content.size=7 range, handled by caller
     }
 
     #[test]
@@ -400,20 +415,26 @@ mod tests {
 
         let make_para = |s: &str| {
             let t = Arc::new(Node::text(text_type.id, s, MarkSet::empty()));
-            Arc::new(Node::new(para_type.id, Attrs::empty(), Fragment::from_node(t), MarkSet::empty()))
+            Arc::new(Node::new(
+                para_type.id,
+                Attrs::empty(),
+                Fragment::from_node(t),
+                MarkSet::empty(),
+            ))
         };
 
         let doc = Arc::new(Node::new(
-            doc_type.id, Attrs::empty(),
+            doc_type.id,
+            Attrs::empty(),
             Fragment::from_nodes(vec![make_para("ab"), make_para("cd")]),
             MarkSet::empty(),
         ));
 
-        assert_eq!(resolve_text_pos(&doc, 0), None);        // doc-level gap before para(ab)
+        assert_eq!(resolve_text_pos(&doc, 0), None); // doc-level gap before para(ab)
         assert_eq!(resolve_text_pos(&doc, 1), Some((0, 0))); // before 'a'
         assert_eq!(resolve_text_pos(&doc, 2), Some((0, 1))); // before 'b'
         assert_eq!(resolve_text_pos(&doc, 3), Some((0, 2))); // after 'b' (end of para(ab))
-        assert_eq!(resolve_text_pos(&doc, 4), None);        // doc-level gap before para(cd)
+        assert_eq!(resolve_text_pos(&doc, 4), None); // doc-level gap before para(cd)
         assert_eq!(resolve_text_pos(&doc, 5), Some((1, 0))); // before 'c'
         assert_eq!(resolve_text_pos(&doc, 6), Some((1, 1))); // before 'd'
         assert_eq!(resolve_text_pos(&doc, 7), Some((1, 2))); // after 'd' (end of para(cd))
@@ -482,8 +503,8 @@ mod tests {
 #[cfg(test)]
 mod api_probe {
     use yrs::{
-        types::xml::XmlOut, Doc, GetString, Transact, WriteTxn, XmlFragment,
-        XmlElementPrelim, XmlTextPrelim, ReadTxn,
+        types::xml::XmlOut, Doc, GetString, ReadTxn, Transact, WriteTxn, XmlElementPrelim,
+        XmlFragment, XmlTextPrelim,
     };
 
     /// Verify that the yrs 0.21 XmlFragment API works as expected.
@@ -548,12 +569,20 @@ mod api_probe {
         }
 
         // Encode full state of each doc
-        let update1 = doc1.transact().encode_state_as_update_v1(&yrs::StateVector::default());
-        let update2 = doc2.transact().encode_state_as_update_v1(&yrs::StateVector::default());
+        let update1 = doc1
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+        let update2 = doc2
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
 
         // Apply each to the other
-        doc1.transact_mut().apply_update(Update::decode_v1(&update2).unwrap()).unwrap();
-        doc2.transact_mut().apply_update(Update::decode_v1(&update1).unwrap()).unwrap();
+        doc1.transact_mut()
+            .apply_update(Update::decode_v1(&update2).unwrap())
+            .unwrap();
+        doc2.transact_mut()
+            .apply_update(Update::decode_v1(&update1).unwrap())
+            .unwrap();
 
         // Read merged text from doc1
         let text1 = {

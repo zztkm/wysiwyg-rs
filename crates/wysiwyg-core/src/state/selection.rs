@@ -2,10 +2,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    model::node::Node,
-    transform::step_map::Mapping,
-};
+use crate::{model::node::Node, transform::step_map::Mapping};
 
 /// A text selection defined by an anchor and head.
 ///
@@ -27,7 +24,10 @@ impl TextSelection {
 
     /// Create a collapsed cursor at `pos`.
     pub fn cursor(pos: usize) -> Self {
-        TextSelection { anchor: pos, head: pos }
+        TextSelection {
+            anchor: pos,
+            head: pos,
+        }
     }
 
     /// The start of the selected range (min of anchor and head).

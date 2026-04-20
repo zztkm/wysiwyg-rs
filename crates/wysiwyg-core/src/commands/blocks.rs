@@ -15,11 +15,7 @@ use crate::{
 /// with the given `attrs`.
 ///
 /// Returns `None` if no block in the selection needs to be changed.
-pub fn set_block_type(
-    state: &EditorState,
-    type_name: &str,
-    attrs: Attrs,
-) -> Option<Transaction> {
+pub fn set_block_type(state: &EditorState, type_name: &str, attrs: Attrs) -> Option<Transaction> {
     let node_type = state.schema.node_type_by_name(type_name)?;
     let type_id = node_type.id;
 
@@ -52,11 +48,8 @@ pub fn set_block_type(
                 use crate::transform::replace_step::ReplaceStep;
                 use crate::transform::step::Step;
                 let frag = crate::model::node::Fragment::from_node(new_child);
-                let step = Step::Replace(ReplaceStep::new(
-                    offset,
-                    child_end,
-                    Slice::new(frag, 0, 0),
-                ));
+                let step =
+                    Step::Replace(ReplaceStep::new(offset, child_end, Slice::new(frag, 0, 0)));
                 tr.step(step).ok()?;
             }
         }
@@ -151,8 +144,12 @@ fn all_blocks_are(
 mod tests {
     use super::*;
     use crate::{
-        model::{attrs::Attrs, node::{Fragment, Node}, mark::MarkSet},
         model::schema::basic_schema,
+        model::{
+            attrs::Attrs,
+            mark::MarkSet,
+            node::{Fragment, Node},
+        },
         state::{EditorState, Selection},
     };
     use std::sync::Arc;

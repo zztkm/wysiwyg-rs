@@ -2,7 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{
-    model::{mark::Mark, node::{Fragment, Node}, schema::Schema, slice::Slice},
+    model::{
+        mark::Mark,
+        node::{Fragment, Node},
+        schema::Schema,
+        slice::Slice,
+    },
     transform::{
         mark_step::{AddMarkStep, RemoveMarkStep},
         replace_step::ReplaceStep,
@@ -78,7 +83,12 @@ impl Transaction {
     }
 
     /// Replace the range `[from..to)` with `slice`.
-    pub fn replace(&mut self, from: usize, to: usize, slice: Slice) -> Result<&mut Self, StepError> {
+    pub fn replace(
+        &mut self,
+        from: usize,
+        to: usize,
+        slice: Slice,
+    ) -> Result<&mut Self, StepError> {
         self.step(Step::Replace(ReplaceStep::new(from, to, slice)))
     }
 
@@ -98,7 +108,12 @@ impl Transaction {
     }
 
     /// Remove `mark` from all inline content in `[from..to)`.
-    pub fn remove_mark(&mut self, from: usize, to: usize, mark: Mark) -> Result<&mut Self, StepError> {
+    pub fn remove_mark(
+        &mut self,
+        from: usize,
+        to: usize,
+        mark: Mark,
+    ) -> Result<&mut Self, StepError> {
         self.step(Step::RemoveMark(RemoveMarkStep::new(from, to, mark)))
     }
 
@@ -156,5 +171,11 @@ impl Transaction {
 
     pub fn doc_changed(&self) -> bool {
         self.transform.doc_changed()
+    }
+
+    /// 全ステップが最終ドキュメントに与えた変更の境界ボックスを返す。
+    /// `Transform::changed_range` に委譲する。
+    pub fn changed_range(&self) -> Option<(usize, usize)> {
+        self.transform.changed_range()
     }
 }

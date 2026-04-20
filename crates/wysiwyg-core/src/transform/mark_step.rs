@@ -45,8 +45,7 @@ impl AddMarkStep {
             });
         }
 
-        let new_content =
-            add_mark_to_fragment(&doc.content, self.from, self.to, &self.mark)?;
+        let new_content = add_mark_to_fragment(&doc.content, self.from, self.to, &self.mark)?;
         let new_doc = Arc::new({
             let mut n = (**doc).clone();
             n.content = new_content;
@@ -313,11 +312,7 @@ impl ReplaceAroundStep {
         // Simplified: identity-ish mapping that shifts positions outside the gap.
         StepMap::from_ranges([
             (self.from, left_old, self.insert.open_start + 1),
-            (
-                self.gap_to,
-                right_old,
-                self.insert.open_end + 1,
-            ),
+            (self.gap_to, right_old, self.insert.open_end + 1),
         ])
     }
 
@@ -344,11 +339,7 @@ impl ReplaceAroundStep {
         let replacement = splice_gap_into_insert(&self.insert, gap_content)?;
 
         // Now apply a ReplaceStep for [from..to) → replacement.
-        let inner_step = ReplaceStep::new(
-            self.from,
-            self.to,
-            Slice::new(replacement, 0, 0),
-        );
+        let inner_step = ReplaceStep::new(self.from, self.to, Slice::new(replacement, 0, 0));
         let (new_doc, _inner_map) = inner_step.apply(doc)?;
         let map = self.get_map();
         Ok((new_doc, map))
@@ -361,9 +352,7 @@ impl ReplaceAroundStep {
         let new_gap_to = new_gap_from + (self.gap_to - self.gap_from);
         Step::ReplaceAround(ReplaceAroundStep {
             from: self.from,
-            to: self.from
-                + self.insert.size()
-                + (self.gap_to - self.gap_from),
+            to: self.from + self.insert.size() + (self.gap_to - self.gap_from),
             gap_from: new_gap_from,
             gap_to: new_gap_to,
             insert: Slice::new(
@@ -398,10 +387,7 @@ impl ReplaceAroundStep {
 ///
 /// For a wrap operation the insert slice has exactly one node whose content
 /// is empty — we splice the gap into that node's content.
-fn splice_gap_into_insert(
-    insert: &Slice,
-    gap: Fragment,
-) -> Result<Fragment, StepError> {
+fn splice_gap_into_insert(insert: &Slice, gap: Fragment) -> Result<Fragment, StepError> {
     if insert.content.is_empty() {
         return Ok(gap);
     }
@@ -557,7 +543,9 @@ mod tests {
         let remove = RemoveMarkStep::new(1, 12, italic());
         let (d3, _) = remove.apply(&d2).unwrap();
         let spans3 = collect_text_and_marks(&d3);
-        assert!(spans3.iter().all(|(_, marks)| !marks.contains(&ITALIC_MARK)));
+        assert!(spans3
+            .iter()
+            .all(|(_, marks)| !marks.contains(&ITALIC_MARK)));
     }
 
     #[test]
