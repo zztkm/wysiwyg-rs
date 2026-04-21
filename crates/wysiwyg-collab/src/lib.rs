@@ -1,31 +1,39 @@
 // wysiwyg-collab: collaborative editing layer using yrs (CRDT)
 //
-// Prototype scope (Phase 4):
-//   - Flat document only: doc > [paragraph*]
-//   - Text insertions and deletions (ReplaceStep with text content)
-//   - Mark changes and block-type changes are NOT synced to yrs in this prototype
-//   - Two-peer convergence is the exit criterion
+// Implemented scope:
+//   - Flat document: doc > [block*] (paragraph, heading, code_block)
+//   - Text insertions and deletions within a single block
+//   - Block split (Enter key, split_block) and block merge (Backspace at start)
+//   - Mark sync (AddMarkStep / RemoveMarkStep → XmlText::format)
+//   - Block type changes (heading / code_block / paragraph)
+//   - Selection clamp after remote update
+//   - Two-peer convergence verified by tests
 //
 // TODO: nested block support (blockquote, list_item containing blocks)
-// TODO: sync AddMarkStep / RemoveMarkStep to yrs as XmlElement attributes
-// TODO: sync block-type changes (heading, code_block) to yrs element tag names
+// TODO: cross-paragraph deletions (ReplaceStep where from and to span multiple blocks)
+// TODO: marks lost on block merge (block B's mark info is stripped — plain text only)
 // TODO: handle ReplaceAroundStep (wrap / lift operations)
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use wysiwyg_core::{
     model::{
-        attrs::Attrs,
-        mark::MarkSet,
+        attrs::{AttrValue, Attrs},
+        mark::{Mark, MarkSet},
         node::{Fragment, Node},
         schema::{basic_schema, Schema},
     },
     state::{EditorState, Selection},
-    transform::{replace_step::ReplaceStep, step::Step},
+    transform::{
+        mark_step::{AddMarkStep, RemoveMarkStep},
+        replace_step::ReplaceStep,
+        step::Step,
+    },
 };
 use yrs::{
     types::xml::XmlOut, updates::decoder::Decode, Doc, GetString, ReadTxn, Text, Transact,
-    WriteTxn, XmlElementPrelim, XmlFragment, XmlTextPrelim,
+    WriteTxn, Xml, XmlElementPrelim, XmlFragment, XmlTextPrelim,
 };
 
 // ---------------------------------------------------------------------------
@@ -60,21 +68,143 @@ pub fn resolve_text_pos(doc: &Arc<Node>, pm_pos: usize) -> Option<(u32, u32)> {
 }
 
 // ---------------------------------------------------------------------------
+// Position helpers
+// ---------------------------------------------------------------------------
+
+/// PM 位置 `[from, to]` に重なる全ブロックの yrs テキスト座標を返す。
+///
+/// 戻り値: `Vec<(block_idx, text_char_start, text_char_len)>`
+///
+/// # Limitations
+///
+/// TODO: UTF-16 非対応 — サロゲートペア文字は char count と UTF-16 code unit 数が異なる。
+///       BMP 外文字を含むドキュメントでは mark 範囲がずれる可能性がある。
+pub fn block_ranges(doc: &Arc<Node>, from: usize, to: usize) -> Vec<(u32, u32, u32)> {
+    let mut result = Vec::new();
+    let mut offset = 0usize;
+    for (idx, block) in doc.content.children.iter().enumerate() {
+        let block_size = block.node_size();
+        let text_start = offset + 1;
+        let text_end = offset + block_size - 1;
+        let range_from = from.max(text_start);
+        let range_to = to.min(text_end);
+        if range_from < range_to {
+            let char_start = (range_from - text_start) as u32;
+            let char_len = (range_to - range_from) as u32;
+            result.push((idx as u32, char_start, char_len));
+        }
+        offset += block_size;
+    }
+    result
+}
+
+/// PM 位置がブロック境界（開きトークン直前）である場合に yrs XmlFragment の
+/// 挿入インデックスを返す。
+fn block_index_from_boundary(doc: &Arc<Node>, pm_pos: usize) -> Option<u32> {
+    let mut offset = 0usize;
+    for (idx, block) in doc.content.children.iter().enumerate() {
+        if offset == pm_pos {
+            return Some(idx as u32);
+        }
+        offset += block.node_size();
+    }
+    if offset == pm_pos {
+        return Some(doc.content.children.len() as u32);
+    }
+    None
+}
+
+/// yrs XmlText::get_string() が返す XML マークアップ文字列を
+/// `(text, mark_names)` セグメントのリストに分解する。
+///
+/// 例: `"h<bold>ell</bold>o"` → `[("h", []), ("ell", ["bold"]), ("o", [])]`
+///
+/// # Limitations
+///
+/// TODO: タグ属性は無視する (e.g. `<link href="...">`)。link mark の href などは
+///       失われる。属性付き mark に対応するには属性をパースする必要がある。
+pub fn parse_yrs_xml_segments(s: &str) -> Vec<(String, Vec<String>)> {
+    let mut result: Vec<(String, Vec<String>)> = Vec::new();
+    let mut mark_stack: Vec<String> = Vec::new();
+    let mut pending_text = String::new();
+    let mut remaining = s;
+
+    while !remaining.is_empty() {
+        if let Some(tag_start) = remaining.find('<') {
+            if tag_start > 0 {
+                pending_text.push_str(&remaining[..tag_start]);
+            }
+            remaining = &remaining[tag_start..];
+
+            if remaining.starts_with("</") {
+                if !pending_text.is_empty() {
+                    result.push((pending_text.clone(), mark_stack.clone()));
+                    pending_text.clear();
+                }
+                if let Some(end) = remaining.find('>') {
+                    let tag_name = remaining[2..end].to_string();
+                    if mark_stack.last() == Some(&tag_name) {
+                        mark_stack.pop();
+                    }
+                    remaining = &remaining[end + 1..];
+                } else {
+                    break;
+                }
+            } else {
+                if !pending_text.is_empty() {
+                    result.push((pending_text.clone(), mark_stack.clone()));
+                    pending_text.clear();
+                }
+                if let Some(end) = remaining.find('>') {
+                    // タグ名のみ取得 (属性は無視)
+                    let tag_content = &remaining[1..end];
+                    let tag_name = tag_content
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or(tag_content)
+                        .to_string();
+                    mark_stack.push(tag_name);
+                    remaining = &remaining[end + 1..];
+                } else {
+                    break;
+                }
+            }
+        } else {
+            pending_text.push_str(remaining);
+            remaining = "";
+        }
+    }
+
+    if !pending_text.is_empty() {
+        result.push((pending_text, mark_stack));
+    }
+
+    result
+}
+
+/// XML マークアップを除いたプレーンテキストを返す。
+pub fn strip_xml_tags(s: &str) -> String {
+    parse_yrs_xml_segments(s)
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Reconstruct PM doc from yrs XmlFragment (reverse sync)
 // ---------------------------------------------------------------------------
 
 /// Read the yrs XmlFragment "content" and rebuild an `Arc<Node>` PM document.
 ///
-/// Only `<paragraph>` elements containing `XmlText` children are supported.
-/// Unknown elements are skipped.
+/// Supports `paragraph`, `heading` (with `level` attribute), and `code_block`.
+/// Mark information is reconstructed from the XML markup returned by
+/// `XmlText::get_string()` (e.g. `"h<bold>ell</bold>o"`).
 ///
 /// # Limitations
 ///
-/// TODO: heading / code_block support — map yrs element tag names (e.g. `"heading"`)
-///       back to the correct PM node type and restore attrs (e.g. `level`).
-/// TODO: mark reconstruction — yrs XmlText attributes should map back to PM marks
-///       (bold, italic, code, link) when mark sync is implemented.
 /// TODO: nested block reconstruction (blockquote, list_item).
+/// TODO: link mark attrs (href, title) are not reconstructed — parse_yrs_xml_segments
+///       ignores tag attributes.
 pub fn build_pm_doc_from_yrs<T: ReadTxn>(
     content: &yrs::XmlFragmentRef,
     txn: &T,
@@ -84,7 +214,7 @@ pub fn build_pm_doc_from_yrs<T: ReadTxn>(
     let para_type = schema.node_type_by_name("paragraph").unwrap();
     let text_type = schema.node_type_by_name("text").unwrap();
 
-    let mut paragraphs: Vec<Arc<Node>> = Vec::new();
+    let mut blocks: Vec<Arc<Node>> = Vec::new();
 
     let len = content.len(txn);
     for i in 0..len {
@@ -94,49 +224,67 @@ pub fn build_pm_doc_from_yrs<T: ReadTxn>(
         let XmlOut::Element(elem) = child else {
             continue;
         };
-        if elem.tag().as_ref() != "paragraph" {
-            continue;
-        }
 
-        // Collect all XmlText strings in the element and concatenate.
-        // TODO: get_string() は format が適用されると XML マークアップを含む文字列を返す
-        //       (例: "h<bold>ell</bold>o")。mark 対応時は diff/iter を使ってプレーンテキストと
-        //       属性スパンを別々に取得し、MarkSet を復元する必要がある。
-        let mut text_content = String::new();
+        let tag = elem.tag();
+        let tag_str = tag.as_ref();
+
+        // ブロックの PM ノード型を tag 名から解決
+        let block_type = match schema.node_type_by_name(tag_str) {
+            Some(nt) => nt,
+            None => continue, // 未知の要素はスキップ
+        };
+
+        // heading の level 属性を復元
+        let block_attrs = if tag_str == "heading" {
+            if let Some(level_str) = elem.get_attribute(txn, "level") {
+                let level: i64 = level_str.parse().unwrap_or(1);
+                Attrs::empty().with("level", AttrValue::Int(level))
+            } else {
+                block_type.default_attrs()
+            }
+        } else {
+            Attrs::empty()
+        };
+
+        // XmlText の内容から mark 付きテキストノードを生成
+        let mut text_nodes: Vec<Arc<Node>> = Vec::new();
         let elem_len = elem.len(txn);
         for j in 0..elem_len {
             if let Some(XmlOut::Text(xml_text)) = elem.get(txn, j) {
-                text_content.push_str(&xml_text.get_string(txn));
+                let xml_str = xml_text.get_string(txn);
+                let segments = parse_yrs_xml_segments(&xml_str);
+                for (text, mark_names) in segments {
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let marks_vec: Vec<Mark> = mark_names
+                        .iter()
+                        .filter_map(|name| schema.mark_type_by_name(name))
+                        .map(|mt| Mark::simple(mt.id))
+                        .collect();
+                    let mark_set = MarkSet::from_marks(marks_vec);
+                    text_nodes.push(Arc::new(Node::text(text_type.id, text.as_str(), mark_set)));
+                }
             }
         }
 
-        let para_node = if text_content.is_empty() {
-            // Empty paragraph
-            Arc::new(Node::new(
-                para_type.id,
-                Attrs::empty(),
-                Fragment::empty(),
-                MarkSet::empty(),
-            ))
+        let block_fragment = if text_nodes.is_empty() {
+            Fragment::empty()
         } else {
-            let text_node = Arc::new(Node::text(
-                text_type.id,
-                text_content.as_str(),
-                MarkSet::empty(),
-            ));
-            Arc::new(Node::new(
-                para_type.id,
-                Attrs::empty(),
-                Fragment::from_node(text_node),
-                MarkSet::empty(),
-            ))
+            Fragment::from_nodes(text_nodes)
         };
-        paragraphs.push(para_node);
+
+        blocks.push(Arc::new(Node::new(
+            block_type.id,
+            block_attrs,
+            block_fragment,
+            MarkSet::empty(),
+        )));
     }
 
-    // Ensure there is at least one paragraph.
-    if paragraphs.is_empty() {
-        paragraphs.push(Arc::new(Node::new(
+    // 少なくとも 1 つの段落を保証する
+    if blocks.is_empty() {
+        blocks.push(Arc::new(Node::new(
             para_type.id,
             Attrs::empty(),
             Fragment::empty(),
@@ -147,7 +295,7 @@ pub fn build_pm_doc_from_yrs<T: ReadTxn>(
     Arc::new(Node::new(
         doc_type.id,
         Attrs::empty(),
-        Fragment::from_nodes(paragraphs),
+        Fragment::from_nodes(blocks),
         MarkSet::empty(),
     ))
 }
@@ -221,13 +369,13 @@ impl CollabState {
                 // (e.g. split_block emits 3 sequential ReplaceSteps).
                 let mut cur = tr.doc_before().clone();
                 for step in tr.steps() {
-                    if let Step::Replace(rs) = step {
-                        self.sync_replace_step_to_yrs(rs, &cur);
+                    match step {
+                        Step::Replace(rs) => self.sync_replace_step_to_yrs(rs, &cur),
+                        Step::AddMark(s) => self.sync_add_mark_step_to_yrs(s, &cur),
+                        Step::RemoveMark(s) => self.sync_remove_mark_step_to_yrs(s, &cur),
+                        // TODO: sync ReplaceAroundStep (wrap/lift operations)
+                        Step::ReplaceAround(_) => {}
                     }
-                    // TODO: sync AddMarkStep / RemoveMarkStep — store mark state as
-                    //       XmlText attributes in yrs so remote peers can reconstruct marks.
-                    // TODO: sync ReplaceAroundStep — needed for wrap/lift (e.g. turning a
-                    //       paragraph into a blockquote or list item).
                     if let Ok((next, _)) = step.apply(&cur) {
                         cur = next;
                     }
@@ -251,22 +399,21 @@ impl CollabState {
     /// Read the yrs document and reconstruct the PM doc, updating the editor
     /// state in place.
     ///
-    /// # Known limitation
+    /// 既存の selection を新ドキュメントのサイズに clamp する。
     ///
-    /// TODO: the selection is always reset to `cursor(1)` after a remote update.
-    ///       The correct behaviour is to remap the existing selection through the
-    ///       update's `Mapping` so the cursor follows the user's intended position.
+    /// # Limitations
+    ///
+    /// TODO: selection を update の Mapping で厳密にリマップするのではなく、
+    ///       単純に clamp しているため、ユーザーのカーソル意図が失われる場合がある。
     pub fn rebuild_pm_from_yrs(&mut self) {
         let txn = self.ydoc.transact();
         let content = txn
             .get_xml_fragment("content")
             .expect("'content' fragment must exist");
         let new_doc = build_pm_doc_from_yrs(&content, &txn, &self.editor.schema);
-        self.editor = EditorState::new(
-            self.editor.schema.clone(),
-            new_doc,
-            Selection::cursor(1), // TODO: remap selection through the update mapping
-        );
+        drop(txn);
+        let clamped_selection = self.editor.selection.clone().clamped(&new_doc);
+        self.editor = EditorState::new(self.editor.schema.clone(), new_doc, clamped_selection);
     }
 
     /// Encode the yrs state as a v1 update that can be sent to a remote peer.
@@ -280,32 +427,53 @@ impl CollabState {
     // -----------------------------------------------------------------------
 
     fn sync_replace_step_to_yrs(&self, rs: &ReplaceStep, doc_before: &Arc<Node>) {
-        // Only handle pure text operations in flat docs.
-        // A text insertion/deletion has from==to (cursor insert) or
-        // from<to (range delete/replace) and a slice with 0 open ends.
-        if rs.slice.open_start != 0 || rs.slice.open_end != 0 {
-            // TODO: handle open slices — these represent block splits (Enter key) and
-            //       block merges (Backspace at start of paragraph), which require
-            //       inserting or removing XmlElement nodes from the yrs XmlFragment.
-            return; // Block-level change — not synced in prototype
+        // --- ケース 1: open slice (ブロック結合 = Backspace at block start) ---
+        if rs.slice.open_start == 1 && rs.slice.open_end == 1 && rs.slice.content.is_empty() {
+            self.sync_block_merge_to_yrs(rs, doc_before);
+            return;
         }
 
-        // Resolve deletion range in the pre-transaction doc.
+        if rs.slice.open_start != 0 || rs.slice.open_end != 0 {
+            // depth > 1 の open slice は未対応
+            return;
+        }
+
+        // --- ケース 2: 新規ブロック挿入 (split_block の step c) ---
+        // from == to かつブロック境界で、slice が 1 つの非リーフノードを含む
+        if rs.from == rs.to && resolve_text_pos(doc_before, rs.from).is_none() {
+            if let Some(new_block) = rs.slice.content.child(0) {
+                if !new_block.is_leaf() {
+                    self.sync_block_insert_to_yrs(rs.from, new_block, doc_before);
+                    return;
+                }
+            }
+        }
+
+        // --- ケース 3: ブロックタイプ変更 (set_block_type) ---
+        // from != to、両端がブロック境界、slice が 1 つの非リーフノード
+        if rs.from != rs.to
+            && resolve_text_pos(doc_before, rs.from).is_none()
+            && resolve_text_pos(doc_before, rs.to).is_none()
+        {
+            if let Some(new_block) = rs.slice.content.child(0) {
+                if !new_block.is_leaf() {
+                    self.sync_block_type_change_to_yrs(rs.from, new_block, doc_before);
+                    return;
+                }
+            }
+        }
+
+        // --- ケース 4: テキスト挿入/削除 (既存ロジック) ---
         let del_from = resolve_text_pos(doc_before, rs.from);
         let del_to = resolve_text_pos(doc_before, rs.to);
-
-        // Determine insertion text from the slice (must be a single text node in
-        // a single paragraph).
         let insert_text: Option<String> = extract_flat_text_from_slice(&rs.slice);
 
         let mut txn = self.ydoc.transact_mut();
         let content = txn.get_or_insert_xml_fragment("content");
 
-        // Delete the range if non-empty.
         if rs.from < rs.to {
             if let (Some((bi, char_from)), Some((bi_to, char_to))) = (del_from, del_to) {
                 if bi == bi_to {
-                    // Deletion within a single paragraph.
                     if let Some(XmlOut::Element(para)) = content.get(&txn, bi) {
                         if let Some(XmlOut::Text(xml_text)) = para.get(&txn, 0) {
                             let delete_len = char_to - char_from;
@@ -313,19 +481,13 @@ impl CollabState {
                         }
                     }
                 }
-                // TODO: cross-paragraph deletions (bi != bi_to) — requires removing
-                //       text from the tail of the first paragraph, removing intermediate
-                //       paragraphs entirely, and removing text from the head of the last
-                //       paragraph, all within a single yrs transaction.
+                // TODO: cross-paragraph deletions (bi != bi_to)
             }
         }
 
-        // Insert text at the from position (in the post-deletion doc, which
-        // we approximate by resolving in the current yrs document).
         if let Some(text) = insert_text {
             if let Some((bi, char_offset)) = resolve_text_pos(doc_before, rs.from) {
                 if let Some(XmlOut::Element(para)) = content.get(&txn, bi) {
-                    // Ensure there is an XmlText node.
                     if para.len(&txn) == 0 {
                         para.insert(&mut txn, 0, XmlTextPrelim::new(""));
                     }
@@ -335,6 +497,218 @@ impl CollabState {
                 }
             }
         }
+    }
+
+    /// open-slice ブロック結合を yrs に同期する。
+    /// ブロック B のプレーンテキストをブロック A 末尾に追記し、ブロック B を削除する。
+    ///
+    /// # Limitations
+    ///
+    /// TODO: ブロック B のマーク情報は失われる。プレーンテキストのみ移動する。
+    fn sync_block_merge_to_yrs(&self, rs: &ReplaceStep, doc_before: &Arc<Node>) {
+        let (bi_a, _) = match resolve_text_pos(doc_before, rs.from) {
+            Some(v) => v,
+            None => return,
+        };
+        let (bi_b, _) = match resolve_text_pos(doc_before, rs.to) {
+            Some(v) => v,
+            None => return,
+        };
+        if bi_b != bi_a + 1 {
+            return;
+        }
+
+        let mut txn = self.ydoc.transact_mut();
+        let content = txn.get_or_insert_xml_fragment("content");
+
+        // ブロック A の XmlText 末尾位置を取得
+        let len_a: u32 = if let Some(XmlOut::Element(para_a)) = content.get(&txn, bi_a) {
+            if let Some(XmlOut::Text(xml_text_a)) = para_a.get(&txn, 0) {
+                xml_text_a.len(&txn)
+            } else {
+                0
+            }
+        } else {
+            return;
+        };
+
+        // ブロック B のプレーンテキストを取得 (mark なし)
+        let b_text: String = if let Some(XmlOut::Element(para_b)) = content.get(&txn, bi_b) {
+            if let Some(XmlOut::Text(xml_text_b)) = para_b.get(&txn, 0) {
+                strip_xml_tags(&xml_text_b.get_string(&txn))
+            } else {
+                String::new()
+            }
+        } else {
+            return;
+        };
+
+        // ブロック A 末尾にブロック B のテキストを追記
+        if !b_text.is_empty() {
+            if let Some(XmlOut::Element(para_a)) = content.get(&txn, bi_a) {
+                if para_a.len(&txn) == 0 {
+                    para_a.insert(&mut txn, 0, XmlTextPrelim::new(""));
+                }
+                if let Some(XmlOut::Text(xml_text_a)) = para_a.get(&txn, 0) {
+                    xml_text_a.insert(&mut txn, len_a, &b_text);
+                }
+            }
+        }
+
+        // ブロック B を削除
+        content.remove_range(&mut txn, bi_b, 1);
+    }
+
+    /// 新しいブロックを yrs XmlFragment に挿入する。
+    fn sync_block_insert_to_yrs(
+        &self,
+        pm_pos: usize,
+        new_block: &Arc<wysiwyg_core::model::node::Node>,
+        doc_before: &Arc<Node>,
+    ) {
+        let insert_idx = match block_index_from_boundary(doc_before, pm_pos) {
+            Some(i) => i,
+            None => return,
+        };
+
+        let type_name = self.editor.schema.node_type(new_block.type_id).name.clone();
+        let text = extract_flat_text_from_block(new_block);
+
+        let mut txn = self.ydoc.transact_mut();
+        let content = txn.get_or_insert_xml_fragment("content");
+
+        let new_elem = content.insert(
+            &mut txn,
+            insert_idx,
+            XmlElementPrelim::empty(type_name.as_ref()),
+        );
+        // heading の level 属性を設定
+        if type_name.as_ref() == "heading" {
+            if let Some(level) = new_block.attrs.get("level") {
+                new_elem.insert_attribute(&mut txn, "level", attr_value_to_string(level));
+            }
+        }
+        // XmlText を追加してテキスト内容を設定
+        let xml_text_prelim = XmlTextPrelim::new(text.as_str());
+        new_elem.insert(&mut txn, 0, xml_text_prelim);
+    }
+
+    /// ブロックタイプ変更を yrs に同期する (heading ↔ paragraph ↔ code_block)。
+    /// 旧 XmlElement の後に新タグの XmlElement を挿入し、テキストをコピーして旧を削除する。
+    fn sync_block_type_change_to_yrs(
+        &self,
+        pm_pos: usize,
+        new_block: &Arc<wysiwyg_core::model::node::Node>,
+        doc_before: &Arc<Node>,
+    ) {
+        let block_idx = match block_index_from_boundary(doc_before, pm_pos) {
+            Some(i) => i,
+            None => return,
+        };
+
+        let new_type_name = self.editor.schema.node_type(new_block.type_id).name.clone();
+
+        let mut txn = self.ydoc.transact_mut();
+        let content = txn.get_or_insert_xml_fragment("content");
+
+        // 旧ブロックのプレーンテキストを取得
+        let old_text: String = if let Some(XmlOut::Element(old_elem)) = content.get(&txn, block_idx)
+        {
+            if let Some(XmlOut::Text(xml_text)) = old_elem.get(&txn, 0) {
+                strip_xml_tags(&xml_text.get_string(&txn))
+            } else {
+                String::new()
+            }
+        } else {
+            return;
+        };
+
+        // 新 XmlElement を旧の位置に挿入
+        let new_elem = content.insert(
+            &mut txn,
+            block_idx,
+            XmlElementPrelim::empty(new_type_name.as_ref()),
+        );
+
+        // heading level 属性を設定
+        if new_type_name.as_ref() == "heading" {
+            if let Some(level) = new_block.attrs.get("level") {
+                new_elem.insert_attribute(&mut txn, "level", attr_value_to_string(level));
+            }
+        }
+
+        // テキスト内容をコピー
+        new_elem.insert(&mut txn, 0, XmlTextPrelim::new(old_text.as_str()));
+
+        // 旧ブロック (インデックスが 1 ずれた位置) を削除
+        content.remove_range(&mut txn, block_idx + 1, 1);
+    }
+
+    /// AddMarkStep を yrs に同期する。mark が適用される各ブロックの XmlText に
+    /// `format()` でフォーマット属性を設定する。
+    fn sync_add_mark_step_to_yrs(&self, step: &AddMarkStep, cur_doc: &Arc<Node>) {
+        let mark_name = self.editor.schema.mark_type(step.mark.type_id).name.clone();
+        let ranges = block_ranges(cur_doc, step.from, step.to);
+        if ranges.is_empty() {
+            return;
+        }
+
+        let mut txn = self.ydoc.transact_mut();
+        let content = txn.get_or_insert_xml_fragment("content");
+
+        for (block_idx, char_start, char_len) in ranges {
+            if let Some(XmlOut::Element(para)) = content.get(&txn, block_idx) {
+                if let Some(XmlOut::Text(xml_text)) = para.get(&txn, 0) {
+                    let mut attrs: HashMap<Arc<str>, yrs::Any> = HashMap::new();
+                    attrs.insert(mark_name.clone(), yrs::Any::Bool(true));
+                    xml_text.format(&mut txn, char_start, char_len, attrs);
+                }
+            }
+        }
+    }
+
+    /// RemoveMarkStep を yrs に同期する。mark が除去される各ブロックの XmlText に
+    /// `format()` で `Any::Null` を設定して属性を削除する。
+    fn sync_remove_mark_step_to_yrs(&self, step: &RemoveMarkStep, cur_doc: &Arc<Node>) {
+        let mark_name = self.editor.schema.mark_type(step.mark.type_id).name.clone();
+        let ranges = block_ranges(cur_doc, step.from, step.to);
+        if ranges.is_empty() {
+            return;
+        }
+
+        let mut txn = self.ydoc.transact_mut();
+        let content = txn.get_or_insert_xml_fragment("content");
+
+        for (block_idx, char_start, char_len) in ranges {
+            if let Some(XmlOut::Element(para)) = content.get(&txn, block_idx) {
+                if let Some(XmlOut::Text(xml_text)) = para.get(&txn, 0) {
+                    let mut attrs: HashMap<Arc<str>, yrs::Any> = HashMap::new();
+                    attrs.insert(mark_name.clone(), yrs::Any::Null);
+                    xml_text.format(&mut txn, char_start, char_len, attrs);
+                }
+            }
+        }
+    }
+}
+
+/// ブロックノードのフラットテキスト内容を返す (mark を無視)。
+fn extract_flat_text_from_block(block: &Arc<Node>) -> String {
+    let mut text = String::new();
+    for child in block.content.children.iter() {
+        if let Some(t) = &child.text {
+            text.push_str(t.as_ref());
+        }
+    }
+    text
+}
+
+/// `AttrValue` を yrs attribute 文字列に変換する。
+fn attr_value_to_string(v: &AttrValue) -> String {
+    match v {
+        AttrValue::String(s) => s.to_string(),
+        AttrValue::Int(i) => i.to_string(),
+        AttrValue::Bool(b) => b.to_string(),
+        AttrValue::Null => String::new(),
     }
 }
 
@@ -377,7 +751,7 @@ fn extract_flat_text_from_slice(slice: &wysiwyg_core::model::slice::Slice) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wysiwyg_core::commands::insert_text;
+    use wysiwyg_core::commands::{insert_text, set_block_type, split_block, toggle_bold};
 
     fn collect_text(node: &Arc<Node>) -> String {
         if let Some(t) = &node.text {
@@ -544,6 +918,117 @@ mod tests {
         assert_eq!(collect_text(&guest.editor.doc), "Hello");
         assert_eq!(guest.editor.doc.child_count(), 1, "段落が 1 つであるべき");
     }
+
+    #[test]
+    fn two_peer_block_split_convergence() {
+        // ホストが "hello" を挿入し、ゲストが参加した後にホストが split_block する。
+        // 両 peer の yrs 側段落数が 2 で一致することを確認する。
+
+        let mut host = CollabState::create_host(1);
+        let tr = insert_text(&host.editor, "hello").unwrap();
+        assert!(host.apply_transaction(tr));
+
+        let initial = host.encode_state_as_update();
+        let mut guest = CollabState::join_guest(2, &initial);
+
+        // カーソルを pos=3 ("he" の後) に置いてブロックを分割
+        let split_state = EditorState::new(
+            host.editor.schema.clone(),
+            host.editor.doc.clone(),
+            Selection::cursor(3),
+        );
+        let tr = split_block(&split_state).unwrap();
+        assert!(host.apply_transaction(tr));
+
+        // ホストの update をゲストへ送信
+        let update = host.encode_state_as_update();
+        guest.apply_remote_update(&update);
+
+        let para_count = |state: &CollabState| {
+            let txn = state.ydoc.transact();
+            let content = txn.get_xml_fragment("content").unwrap();
+            content.len(&txn)
+        };
+
+        assert_eq!(para_count(&host), 2, "ホストの段落数が 2 であるべき");
+        assert_eq!(para_count(&guest), 2, "ゲストの段落数が 2 であるべき");
+    }
+
+    #[test]
+    fn two_peer_mark_convergence() {
+        // ホストが "hello" に bold を適用し、ゲストへ同期する。
+        // ゲストの PM doc に bold mark が反映されることを確認する。
+
+        let mut host = CollabState::create_host(1);
+        let tr = insert_text(&host.editor, "hello").unwrap();
+        assert!(host.apply_transaction(tr));
+
+        let initial = host.encode_state_as_update();
+        let mut guest = CollabState::join_guest(2, &initial);
+
+        // テキスト全体 (pos 1–6) を選択して bold を toggle
+        let bold_state = EditorState::new(
+            host.editor.schema.clone(),
+            host.editor.doc.clone(),
+            Selection::text(1, 6),
+        );
+        let tr = toggle_bold(&bold_state).unwrap();
+        assert!(host.apply_transaction(tr));
+
+        let update = host.encode_state_as_update();
+        guest.apply_remote_update(&update);
+
+        let bold_id = guest.editor.schema.mark_type_by_name("bold").unwrap().id;
+        let para = guest.editor.doc.child(0).unwrap();
+        let has_bold = para
+            .content
+            .children
+            .iter()
+            .any(|n| n.marks.contains(bold_id));
+        assert!(has_bold, "ゲストの doc に bold mark があるべき");
+    }
+
+    #[test]
+    fn two_peer_block_type_convergence() {
+        // ホストが段落を heading level=2 に変更し、ゲストへ同期する。
+        // ゲストの PM doc でブロックが heading かつ level=2 であることを確認する。
+
+        let mut host = CollabState::create_host(1);
+        let tr = insert_text(&host.editor, "hello").unwrap();
+        assert!(host.apply_transaction(tr));
+
+        let initial = host.encode_state_as_update();
+        let mut guest = CollabState::join_guest(2, &initial);
+
+        // 段落を heading level=2 に変更
+        let heading_state = EditorState::new(
+            host.editor.schema.clone(),
+            host.editor.doc.clone(),
+            Selection::cursor(1),
+        );
+        let tr = set_block_type(
+            &heading_state,
+            "heading",
+            Attrs::empty().with("level", AttrValue::Int(2)),
+        )
+        .unwrap();
+        assert!(host.apply_transaction(tr));
+
+        let update = host.encode_state_as_update();
+        guest.apply_remote_update(&update);
+
+        let heading_type = guest.editor.schema.node_type_by_name("heading").unwrap();
+        let block = guest.editor.doc.child(0).unwrap();
+        assert_eq!(
+            block.type_id, heading_type.id,
+            "ゲストの doc でブロックが heading であるべき"
+        );
+        assert_eq!(
+            block.attrs.get("level"),
+            Some(&AttrValue::Int(2)),
+            "level が 2 であるべき"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -635,6 +1120,71 @@ mod api_probe {
                 }
             } else {
                 panic!("paragraph が見つからない");
+            }
+        }
+    }
+
+    /// format() 後に段落が子 1 つ (XmlText) のままで、get_string() が XML markup を返すことを確認。
+    #[test]
+    fn yrs_xmltext_children_after_format() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use yrs::{
+            types::xml::XmlOut, Any, Doc, ReadTxn, Transact, WriteTxn, XmlElementPrelim,
+            XmlFragment, XmlTextPrelim,
+        };
+
+        let doc = Doc::new();
+        {
+            let mut txn = doc.transact_mut();
+            let content = txn.get_or_insert_xml_fragment("content");
+            let para = content.insert(&mut txn, 0, XmlElementPrelim::empty("paragraph"));
+            para.insert(&mut txn, 0, XmlTextPrelim::new("hello"));
+        }
+        {
+            let mut txn = doc.transact_mut();
+            let content = txn.get_or_insert_xml_fragment("content");
+            if let Some(XmlOut::Element(para)) = content.get(&txn, 0) {
+                if let Some(XmlOut::Text(xml_text)) = para.get(&txn, 0) {
+                    let mut attrs: HashMap<Arc<str>, Any> = HashMap::new();
+                    attrs.insert(Arc::from("bold"), Any::Bool(true));
+                    xml_text.format(&mut txn, 1, 3, attrs);
+                }
+            }
+        }
+        {
+            let txn = doc.transact();
+            let content = txn.get_xml_fragment("content").unwrap();
+            if let Some(XmlOut::Element(para)) = content.get(&txn, 0) {
+                let child_count = para.len(&txn);
+                // format() が inline element を生成するなら child_count > 1
+                // XmlText 内部に埋め込むなら child_count == 1
+                assert!(child_count >= 1);
+                // 子ノードを走査してテキスト内容を収集する
+                let mut collected = String::new();
+                let mut inline_elem_count = 0u32;
+                for i in 0..child_count {
+                    match para.get(&txn, i) {
+                        Some(XmlOut::Text(t)) => collected.push_str(&t.get_string(&txn)),
+                        Some(XmlOut::Element(e)) => {
+                            inline_elem_count += 1;
+                            for j in 0..e.len(&txn) {
+                                if let Some(XmlOut::Text(t2)) = e.get(&txn, j) {
+                                    collected.push_str(&t2.get_string(&txn));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                // format() は inline element を生成しない — child_count == 1 のまま
+                assert_eq!(child_count, 1, "段落の子が 1 つであるべき");
+                assert_eq!(inline_elem_count, 0, "inline element は生成されない");
+                // get_string() は XML markup を含む文字列を返す
+                assert!(
+                    collected.contains("bold"),
+                    "bold マークアップが含まれるはず: {collected}"
+                );
             }
         }
     }
