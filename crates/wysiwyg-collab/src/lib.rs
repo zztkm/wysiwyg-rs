@@ -10,9 +10,6 @@
 // TODO: sync AddMarkStep / RemoveMarkStep to yrs as XmlElement attributes
 // TODO: sync block-type changes (heading, code_block) to yrs element tag names
 // TODO: handle ReplaceAroundStep (wrap / lift operations)
-// TODO: proper initial-state sharing — CollabState::new() creates a paragraph per peer,
-//       leading to N paragraphs after CRDT merge; real use requires one peer to initialise
-//       and distribute state via encode_state_as_update → apply_remote_update before editing
 
 use std::sync::Arc;
 
@@ -102,6 +99,9 @@ pub fn build_pm_doc_from_yrs<T: ReadTxn>(
         }
 
         // Collect all XmlText strings in the element and concatenate.
+        // TODO: get_string() は format が適用されると XML マークアップを含む文字列を返す
+        //       (例: "h<bold>ell</bold>o")。mark 対応時は diff/iter を使ってプレーンテキストと
+        //       属性スパンを別々に取得し、MarkSet を復元する必要がある。
         let mut text_content = String::new();
         let elem_len = elem.len(txn);
         for j in 0..elem_len {
@@ -166,23 +166,15 @@ pub struct CollabState {
 }
 
 impl CollabState {
-    /// Create a new `CollabState` from a `yrs::Doc` id (useful for multi-peer
-    /// tests) and an empty document.
+    /// Create a host `CollabState` with a single empty paragraph.
     ///
-    /// # Known limitation
-    ///
-    /// Each peer that calls `new()` inserts its own initial empty paragraph into
-    /// its private yrs document.  After a CRDT merge the two paragraphs coexist,
-    /// resulting in N paragraphs for N peers rather than a single shared document.
-    ///
-    /// TODO: replace this constructor with a factory pattern where one designated
-    ///       peer creates the document and distributes the initial state via
-    ///       `encode_state_as_update` before any other peer starts editing.
-    pub fn new(client_id: u64) -> Self {
+    /// Only one peer should call this. After editing, distribute the initial
+    /// state to other peers via `encode_state_as_update` before they start
+    /// editing, then have them call `join_guest`.
+    pub fn create_host(client_id: u64) -> Self {
         let schema = basic_schema();
         let editor = EditorState::with_empty_doc(schema);
         let ydoc = Doc::with_client_id(client_id);
-        // Initialise the yrs side with an empty paragraph.
         {
             let mut txn = ydoc.transact_mut();
             let content = txn.get_or_insert_xml_fragment("content");
@@ -191,24 +183,54 @@ impl CollabState {
         CollabState { editor, ydoc }
     }
 
+    /// Join as a guest peer, bootstrapping state from the host's update bytes.
+    ///
+    /// `initial_update` must be produced by `encode_state_as_update` on the
+    /// host (or any peer that already has the canonical initial document).
+    pub fn join_guest(client_id: u64, initial_update: &[u8]) -> Self {
+        let schema = basic_schema();
+        let ydoc = Doc::with_client_id(client_id);
+        {
+            let mut txn = ydoc.transact_mut();
+            txn.apply_update(
+                yrs::Update::decode_v1(initial_update).expect("join_guest: decode_v1 failed"),
+            )
+            .expect("join_guest: apply_update failed");
+        }
+        let new_doc = {
+            let txn = ydoc.transact();
+            let content = txn
+                .get_xml_fragment("content")
+                .expect("'content' fragment must exist after applying host update");
+            build_pm_doc_from_yrs(&content, &txn, &schema)
+        };
+        let editor = EditorState::new(schema, new_doc, Selection::cursor(1));
+        CollabState { editor, ydoc }
+    }
+
     /// Apply a PM transaction to the editor state, and propagate text-only
     /// steps to the yrs document.
     ///
     /// Returns `true` if the transaction was applied successfully.
     pub fn apply_transaction(&mut self, tr: wysiwyg_core::state::Transaction) -> bool {
-        let doc_before = self.editor.doc.clone();
         match self.editor.apply(&tr) {
             Ok(new_state) => {
                 self.editor = new_state;
-                // Sync text steps to yrs.
+                // Advance `cur` through each step so that position resolution
+                // uses the correct pre-step document even in multi-step transactions
+                // (e.g. split_block emits 3 sequential ReplaceSteps).
+                let mut cur = tr.doc_before().clone();
                 for step in tr.steps() {
                     if let Step::Replace(rs) = step {
-                        self.sync_replace_step_to_yrs(rs, &doc_before);
+                        self.sync_replace_step_to_yrs(rs, &cur);
                     }
                     // TODO: sync AddMarkStep / RemoveMarkStep — store mark state as
                     //       XmlText attributes in yrs so remote peers can reconstruct marks.
                     // TODO: sync ReplaceAroundStep — needed for wrap/lift (e.g. turning a
                     //       paragraph into a blockquote or list item).
+                    if let Ok((next, _)) = step.apply(&cur) {
+                        cur = next;
+                    }
                 }
                 true
             }
@@ -357,6 +379,13 @@ mod tests {
     use super::*;
     use wysiwyg_core::commands::insert_text;
 
+    fn collect_text(node: &Arc<Node>) -> String {
+        if let Some(t) = &node.text {
+            return t.to_string();
+        }
+        node.content.children.iter().map(collect_text).collect()
+    }
+
     #[test]
     fn resolve_text_pos_single_para() {
         // doc > [para("hello")]
@@ -442,32 +471,27 @@ mod tests {
 
     #[test]
     fn two_peer_text_convergence() {
-        // Peer A and Peer B each start with an empty doc.
-        // Peer A types "hello", Peer B types "world".
-        // After syncing both should converge: yrs guarantees identical state.
+        // ホストが空ドキュメントを作成し、ゲストが initial state を受け取ってから
+        // 両者が独立に編集し、最後に同期する。
 
-        let mut peer_a = CollabState::new(1);
-        let mut peer_b = CollabState::new(2);
+        let mut host = CollabState::create_host(1);
+        let initial = host.encode_state_as_update();
+        let mut guest = CollabState::join_guest(2, &initial);
 
-        // Peer A inserts "hello"
-        let tr_a = insert_text(&peer_a.editor, "hello").unwrap();
-        assert!(peer_a.apply_transaction(tr_a));
+        // ホストが "hello" を挿入
+        let tr_a = insert_text(&host.editor, "hello").unwrap();
+        assert!(host.apply_transaction(tr_a));
 
-        // Peer B inserts "world"
-        let tr_b = insert_text(&peer_b.editor, "world").unwrap();
-        assert!(peer_b.apply_transaction(tr_b));
+        // ゲストが "world" を挿入
+        let tr_b = insert_text(&guest.editor, "world").unwrap();
+        assert!(guest.apply_transaction(tr_b));
 
-        // Exchange full state updates.
-        let update_a = peer_a.encode_state_as_update();
-        let update_b = peer_b.encode_state_as_update();
+        // 全量 update を交換
+        let update_a = host.encode_state_as_update();
+        let update_b = guest.encode_state_as_update();
+        host.apply_remote_update(&update_b);
+        guest.apply_remote_update(&update_a);
 
-        peer_a.apply_remote_update(&update_b);
-        peer_b.apply_remote_update(&update_a);
-
-        // Read merged text from yrs by concatenating all XmlText across all paragraphs.
-        // Note: because each peer inserts a paragraph at index 0 in CollabState::new(),
-        // after CRDT merge there are 2 paragraphs (one per peer).  Each paragraph holds
-        // one peer's text, so we concatenate all paragraphs to get the full merged result.
         fn read_text(state: &CollabState) -> String {
             let txn = state.ydoc.transact();
             let content = txn.get_xml_fragment("content").unwrap();
@@ -486,24 +510,46 @@ mod tests {
             out
         }
 
-        let text_a = read_text(&peer_a);
-        let text_b = read_text(&peer_b);
+        let text_host = read_text(&host);
+        let text_guest = read_text(&guest);
 
-        // Both peers converge to the same text (yrs CRDT guarantee).
-        assert_eq!(text_a, text_b, "peers did not converge");
-
-        // The merged text must contain both strings.
+        assert_eq!(text_host, text_guest, "peers did not converge");
         assert!(
-            text_a.contains("hello") && text_a.contains("world"),
-            "merged text '{text_a}' is missing content"
+            text_host.contains("hello") && text_host.contains("world"),
+            "merged text '{text_host}' is missing content"
         );
+
+        // factory pattern では段落が 1 つだけ存在する（重複なし）
+        let para_count = {
+            let txn = host.ydoc.transact();
+            let content = txn.get_xml_fragment("content").unwrap();
+            content.len(&txn)
+        };
+        assert_eq!(para_count, 1, "段落が重複している");
+    }
+
+    #[test]
+    fn host_guest_initial_share() {
+        // ホストが "Hello" を入力し、その後ゲストが join_guest で参加する。
+        // ゲストの PM doc が正しく "Hello" を含んでいること、かつ段落が 1 つであることを確認。
+
+        let mut host = CollabState::create_host(1);
+
+        let tr = insert_text(&host.editor, "Hello").unwrap();
+        assert!(host.apply_transaction(tr));
+
+        let update = host.encode_state_as_update();
+        let guest = CollabState::join_guest(2, &update);
+
+        assert_eq!(collect_text(&guest.editor.doc), "Hello");
+        assert_eq!(guest.editor.doc.child_count(), 1, "段落が 1 つであるべき");
     }
 }
 
 #[cfg(test)]
 mod api_probe {
     use yrs::{
-        types::xml::XmlOut, Doc, GetString, ReadTxn, Transact, WriteTxn, XmlElementPrelim,
+        types::xml::XmlOut, Doc, GetString, ReadTxn, Text, Transact, WriteTxn, XmlElementPrelim,
         XmlFragment, XmlTextPrelim,
     };
 
@@ -539,6 +585,57 @@ mod api_probe {
                 other => panic!("expected XmlText, got {:?}", other),
             };
             assert_eq!(xml_text.get_string(&txn), "hello");
+        }
+    }
+
+    /// yrs XmlText::format でマーク適用後もプレーンテキストが保持されることを確認する。
+    /// PR2 の mark 同期実装の前提 API 検証。
+    #[test]
+    fn yrs_xmltext_format_roundtrip() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use yrs::Any;
+
+        let doc = Doc::new();
+        {
+            let mut txn = doc.transact_mut();
+            let content = txn.get_or_insert_xml_fragment("content");
+            let para = content.insert(&mut txn, 0, XmlElementPrelim::empty("paragraph"));
+            para.insert(&mut txn, 0, XmlTextPrelim::new("hello"));
+        }
+        // "ell" (chars 1-3) に bold フォーマットを適用
+        {
+            let mut txn = doc.transact_mut();
+            let content = txn.get_or_insert_xml_fragment("content");
+            if let Some(XmlOut::Element(para)) = content.get(&txn, 0) {
+                if let Some(XmlOut::Text(xml_text)) = para.get(&txn, 0) {
+                    let mut attrs: HashMap<Arc<str>, Any> = HashMap::new();
+                    attrs.insert(Arc::from("bold"), Any::Bool(true));
+                    xml_text.format(&mut txn, 1, 3, attrs);
+                }
+            }
+        }
+        // XmlText::get_string() は format 情報を XML マークアップとして埋め込んだ文字列を返す。
+        // プレーンテキストの復元には diff/iter が必要 (PR2 の mark 再構成で実装予定)。
+        {
+            let txn = doc.transact();
+            let content = txn.get_xml_fragment("content").unwrap();
+            if let Some(XmlOut::Element(para)) = content.get(&txn, 0) {
+                if let Some(XmlOut::Text(xml_text)) = para.get(&txn, 0) {
+                    let s = xml_text.get_string(&txn);
+                    // format 後: bold タグが埋め込まれる
+                    assert!(s.contains("bold"), "bold マークアップが含まれるはず: {s}");
+                    // テキスト内容はすべて含まれる
+                    assert!(
+                        s.contains('h') && s.contains("ell") && s.contains('o'),
+                        "テキスト内容が欠落している: {s}"
+                    );
+                } else {
+                    panic!("XmlText ノードが見つからない");
+                }
+            } else {
+                panic!("paragraph が見つからない");
+            }
         }
     }
 
