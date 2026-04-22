@@ -422,6 +422,23 @@ impl CollabState {
         txn.encode_state_as_update_v1(&yrs::StateVector::default())
     }
 
+    /// 自ドキュメントの state vector を返す。
+    ///
+    /// 差分同期のため、対向 peer に送って「あなたから見て私の知らない op を送って」と
+    /// 要求する用途に使う。ネットワーク転送する場合は `yrs::Encode::encode_v1()` で
+    /// バイト列に直列化する。
+    pub fn state_vector(&self) -> yrs::StateVector {
+        self.ydoc.transact().state_vector()
+    }
+
+    /// `remote_sv` から見て自分が新たに持っている op のみを v1 update として encode する。
+    ///
+    /// 全量 `encode_state_as_update` と比較して、共有済みの op を除いた差分のみを返すため
+    /// 転送量が小さくなる。戻り値は `apply_remote_update` で受け取れる。
+    pub fn encode_diff(&self, remote_sv: &yrs::StateVector) -> Vec<u8> {
+        self.ydoc.transact().encode_diff_v1(remote_sv)
+    }
+
     // -----------------------------------------------------------------------
     // Internal: forward sync
     // -----------------------------------------------------------------------
@@ -1027,6 +1044,67 @@ mod tests {
             block.attrs.get("level"),
             Some(&AttrValue::Int(2)),
             "level が 2 であるべき"
+        );
+    }
+
+    #[test]
+    fn two_peer_incremental_sync() {
+        // 差分同期の動作確認。
+        // 1. host/guest を初期化し同期
+        // 2. 各々が独立に編集
+        // 3. state vector を交換 → 差分 update を計算して適用
+        // 4. 両者が収束し、かつ差分 update の方が全量 update より小さい
+
+        let mut host = CollabState::create_host(1);
+        let tr = insert_text(&host.editor, "Hello").unwrap();
+        assert!(host.apply_transaction(tr));
+
+        let initial = host.encode_state_as_update();
+        let mut guest = CollabState::join_guest(2, &initial);
+
+        // 各々が独立に編集 (host は末尾に追記、guest も同様)
+        let host_end = collect_text(&host.editor.doc).chars().count() + 1;
+        let host_at_end = EditorState::new(
+            host.editor.schema.clone(),
+            host.editor.doc.clone(),
+            Selection::cursor(host_end),
+        );
+        let tr = insert_text(&host_at_end, ", host").unwrap();
+        assert!(host.apply_transaction(tr));
+
+        let guest_end = collect_text(&guest.editor.doc).chars().count() + 1;
+        let guest_at_end = EditorState::new(
+            guest.editor.schema.clone(),
+            guest.editor.doc.clone(),
+            Selection::cursor(guest_end),
+        );
+        let tr = insert_text(&guest_at_end, " & guest").unwrap();
+        assert!(guest.apply_transaction(tr));
+
+        // 差分同期
+        let sv_host = host.state_vector();
+        let sv_guest = guest.state_vector();
+        let diff_for_host = guest.encode_diff(&sv_host);
+        let diff_for_guest = host.encode_diff(&sv_guest);
+
+        host.apply_remote_update(&diff_for_host);
+        guest.apply_remote_update(&diff_for_guest);
+
+        // 収束確認
+        let host_text = collect_text(&host.editor.doc);
+        let guest_text = collect_text(&guest.editor.doc);
+        assert_eq!(host_text, guest_text, "テキストが収束していない");
+        assert!(host_text.contains("Hello"));
+        assert!(host_text.contains("host"));
+        assert!(host_text.contains("guest"));
+
+        // 差分 update の方が全量 update より小さい (共有済み "Hello" 部が省かれる)
+        let full_update = host.encode_state_as_update();
+        assert!(
+            diff_for_guest.len() < full_update.len(),
+            "差分 update ({}) が全量 update ({}) 以上のサイズになっている",
+            diff_for_guest.len(),
+            full_update.len(),
         );
     }
 }
